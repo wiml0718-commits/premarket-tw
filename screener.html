@@ -25,6 +25,9 @@ a{color:var(--d1);text-decoration:none}
 .metric .k{font-size:10px;color:var(--muted);margin-bottom:2px}
 .metric .v{font-size:13px;font-weight:600}
 .scorebadge{padding:4px 9px;border-radius:8px;font-weight:700;font-size:14px}
+.filt{padding:7px 12px;border-radius:999px;border:1px solid var(--line);background:var(--panelHi);color:var(--muted);font-size:12px;font-family:inherit;cursor:pointer}
+.filt.on{background:var(--d1);border-color:var(--d1);color:#0A0E1A;font-weight:700}
+.tag{padding:3px 8px;border-radius:7px;font-size:11px;font-weight:600}
 .spin{width:34px;height:34px;border:3px solid var(--line);border-top-color:var(--d1);border-radius:50%;animation:sp 1s linear infinite;margin:30px auto}
 @keyframes sp{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion:reduce){.spin{animation:none}}
@@ -46,6 +49,11 @@ a{color:var(--d1);text-decoration:none}
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#0A0E1A" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6"/></svg>
         <span id="runLabel">掃描</span>
       </button>
+    </div>
+    <div class="row" style="gap:8px;margin-top:11px">
+      <button class="filt" id="fGrowth">排除營收衰退</button>
+      <button class="filt" id="fCyc">排除週期股</button>
+      <span class="mono" id="count" style="margin-left:auto;font-size:11px;color:var(--muted)"></span>
     </div>
     <div id="msg" style="margin-top:8px;font-size:11.5px;color:var(--muted);display:none"></div>
   </div>
@@ -79,6 +87,12 @@ function fmt(v,suf=''){return v==null?'—':v+suf;}
 
 function rowCard(r,i){
   const sc=scoreColor(r.score);
+  let tags='';
+  if(r.cyclical)tags+=`<span class="tag" style="background:#E8843C1F;color:var(--d1)">週期股·${r.cyclical}</span>`;
+  if(r.rev!=null&&r.rev<0)tags+=`<span class="tag" style="background:#FF3B471F;color:var(--up)">營收衰退</span>`;
+  else if(r.rev!=null&&r.rev>0)tags+=`<span class="tag" style="background:#6FA8FF1F;color:var(--hot)">營收成長</span>`;
+  const tagRow=tags?`<div class="row" style="gap:6px;margin-bottom:10px;flex-wrap:wrap">${tags}</div>`:'';
+  const revColor=r.rev==null?'var(--text)':(r.rev<0?'var(--up)':'var(--hot)');
   return `<div class="card">
     <div class="row" style="gap:11px;margin-bottom:11px">
       <div class="rank" style="background:${sc}22;color:${sc}">${i+1}</div>
@@ -88,6 +102,7 @@ function rowCard(r,i){
       </div>
       <div class="scorebadge" style="background:${sc}1F;color:${sc}">${r.score}</div>
     </div>
+    ${tagRow}
     <div class="row" style="gap:10px">
       <div class="metric"><div class="k">5年位階</div><div class="v mono" style="color:${r.pos<25?'var(--down)':'var(--text)'}">${fmt(r.pos,'%')}</div></div>
       <div class="metric"><div class="k">距高點</div><div class="v mono">${fmt(r.drawdown,'%')}</div></div>
@@ -98,10 +113,22 @@ function rowCard(r,i){
       <div class="metric"><div class="k">本益比</div><div class="v mono">${fmt(r.pe)}</div></div>
       <div class="metric"><div class="k">股價淨值</div><div class="v mono">${fmt(r.pb)}</div></div>
       <div class="metric"><div class="k">殖利率</div><div class="v mono">${fmt(r.yld,'%')}</div></div>
-      <div class="metric"></div>
+      <div class="metric"><div class="k">營收YoY${r.rev_src?'('+r.rev_src+')':''}</div><div class="v mono" style="color:${revColor}">${fmt(r.rev,'%')}</div></div>
     </div>
   </div>`;
 }
+
+let DATA=[];
+const filt={growth:false,cyc:false};
+function applyFilters(){
+  let rows=DATA.slice();
+  if(filt.growth)rows=rows.filter(r=>!(r.rev!=null&&r.rev<0));
+  if(filt.cyc)rows=rows.filter(r=>!r.cyclical);
+  $('list').innerHTML=rows.map((r,i)=>rowCard(r,i)).join('');
+  $('count').textContent='顯示 '+rows.length+' 檔';
+}
+$('fGrowth').addEventListener('click',()=>{filt.growth=!filt.growth;$('fGrowth').classList.toggle('on',filt.growth);applyFilters();});
+$('fCyc').addEventListener('click',()=>{filt.cyc=!filt.cyc;$('fCyc').classList.toggle('on',filt.cyc);applyFilters();});
 
 async function run(){
   $('list').innerHTML='';$('loading').style.display='block';
@@ -111,9 +138,10 @@ async function run(){
     if(!r.ok)throw new Error('HTTP '+r.status);
     const d=await r.json();
     if(d.error)throw new Error(d.error);
+    DATA=d.rows;
     const t=new Date();
     $('updated').textContent='更新 '+t.toLocaleString('zh-TW',{hour12:false}).slice(5)+'　共 '+d.count+' 檔';
-    $('list').innerHTML=d.rows.map(rowCard).join('');
+    applyFilters();
   }catch(e){
     $('msg').style.display='block';$('msg').style.color='var(--down)';
     $('msg').textContent='掃描失敗：'+e.message+'。稍候再試一次。';
