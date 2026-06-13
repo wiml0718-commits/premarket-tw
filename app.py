@@ -10,9 +10,13 @@
 """
 
 from datetime import datetime, timezone
+import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 import yfinance as yf
+
+BASE = os.path.dirname(os.path.abspath(__file__))
 
 app = FastAPI(title="premarket-tw")
 
@@ -96,4 +100,4 @@ def predict():
 
 @app.get("/")
 def root():
-    return {"ok": True, "endpoint": "/api/predict"}
+    return FileResponse(os.path.join(BASE, "index.html"))
