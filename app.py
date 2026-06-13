@@ -148,16 +148,23 @@ def finmind_rev_growth(code):
 
 
 def _valuation(code):
-    """best-effort 抓本益比/股價淨值比/殖利率。"""
+    """FinMind 估值：本益比 PER、股價淨值比 PBR、殖利率（台股本地資料，覆蓋率高）。"""
     try:
-        info = yf.Ticker(code + ".TW").info
-        y = info.get("dividendYield")
-        if y is not None and y < 1:  # yfinance 有時回小數
-            y = y * 100
-        return {"pe": info.get("trailingPE"), "pb": info.get("priceToBook"),
-                "yld": y, "rev": info.get("revenueGrowth")}
+        start = (date.today() - timedelta(days=14)).isoformat()
+        headers = {"Authorization": f"Bearer {FINMIND_TOKEN}"} if FINMIND_TOKEN else {}
+        params = {"dataset": "TaiwanStockPER", "data_id": code, "start_date": start}
+        r = requests.get(FINMIND_URL, params=params, headers=headers, timeout=12)
+        rows = r.json().get("data", [])
+        if not rows:
+            return {"pe": None, "pb": None, "yld": None}
+        rows.sort(key=lambda d: d["date"])
+        last = rows[-1]
+        pe, pb, y = last.get("PER"), last.get("PBR"), last.get("dividend_yield")
+        return {"pe": pe if (pe and pe > 0) else None,
+                "pb": pb if (pb and pb > 0) else None,
+                "yld": y if y else None}
     except Exception:
-        return {"pe": None, "pb": None, "yld": None, "rev": None}
+        return {"pe": None, "pb": None, "yld": None}
 
 
 def _rank_scores(values, higher_better):
@@ -191,7 +198,7 @@ def screener(force: int = 0):
     except Exception as e:
         return {"error": f"price download failed: {e}", "rows": []}
 
-    # 平行抓估值（yfinance）與月營收年增率（FinMind），每日只跑一次
+    # 平行抓估值與月營收年增率（皆 FinMind），每日只跑一次
     with ThreadPoolExecutor(max_workers=10) as ex:
         vals = list(ex.map(_valuation, codes))
     with ThreadPoolExecutor(max_workers=8) as ex:
@@ -233,13 +240,8 @@ def screener(force: int = 0):
         r["pb"] = round(v["pb"], 2) if v["pb"] else None
         r["yld"] = round(v["yld"], 2) if v["yld"] else None
         rv_fm = revmap.get(r["code"])
-        if rv_fm is not None:
-            r["rev"] = rv_fm
-            r["rev_src"] = "月"
-        else:
-            rv = v.get("rev")
-            r["rev"] = round(rv * 100, 1) if isinstance(rv, (int, float)) else None
-            r["rev_src"] = "季" if r["rev"] is not None else None
+        r["rev"] = rv_fm
+        r["rev_src"] = "月" if rv_fm is not None else None
         r["cyclical"] = CYCLICAL.get(r["code"])
 
         # 子分數（越接近低點/越便宜越高）
