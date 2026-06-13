@@ -55,6 +55,7 @@ a{color:var(--d1);text-decoration:none}
 
   <div id="cats" class="catrow"></div>
   <div id="etfNote" style="display:none;font-size:11.5px;color:var(--muted);background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:9px 12px;margin-bottom:12px;line-height:1.6">ETF 是一籃子股票，以「價格位階＋技術」評分；基金無本益比、營收，故不顯示那幾欄。</div>
+  <div id="mktNote" style="display:none;font-size:11.5px;color:var(--muted);background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:9px 12px;margin-bottom:12px;line-height:1.6">⚡ 全上市低點：掃成交值前 200 大上市股，篩出<b style="color:var(--text)">同時</b>符合「3年位階&lt;25% 且 RSI&lt;40 且 距高點&lt;-30%」者，再補估值/營收排序。第一次跑較久。</div>
 
   <div class="panel" style="padding:12px 14px;margin-bottom:14px">
     <div class="row between">
@@ -80,7 +81,7 @@ a{color:var(--d1);text-decoration:none}
 
   <div id="list"></div>
   <div id="loading" style="display:none"><div class="spin"></div>
-    <div style="text-align:center;font-size:12px;color:var(--muted)">運算中，約 30–90 秒（為避免限流會逐筆抓取，首次喚醒服務會更久）</div>
+    <div id="loadTxt" style="text-align:center;font-size:12px;color:var(--muted)">運算中，約 30–90 秒（為避免限流會逐筆抓取，首次喚醒服務會更久）</div>
   </div>
 
   <div style="font-size:11px;color:var(--muted);margin-top:16px;line-height:1.6">
@@ -110,7 +111,7 @@ function fmt(v,suf=''){return v==null?'—':v+suf;}
 
 const GLOSSARY={
  score:{t:'綜合分數',d:'把「價格位階、技術、估值」三項各自評分後加權（40 / 30 / 30）算出的總分，0–100。越高代表越接近相對低點。⚠ 分數高不等於該買，只是縮小研究範圍的起點。'},
- pos:{t:'5年位階',d:'現在股價落在過去 5 年最高∼最低區間的哪個位置。例如 7% 代表接近 5 年最低區（相對便宜）；數字越低、分數越高。'},
+ pos:{t:'價格位階',d:'現在股價落在過去區間（分類 5 年、全上市 3 年）最高∼最低的哪個位置。例如 7% 代表接近區間最低（相對便宜）；數字越低、分數越高。'},
  drawdown:{t:'距高點',d:'從近 5 年最高點到現在跌了多少。-40% 代表已從高點回檔四成。跌得深不等於便宜，要搭配其他指標一起看。'},
  rsi:{t:'RSI 相對強弱指標',d:'0–100 的技術指標。低於 30 常被視為「超賣」（可能跌過頭、有反彈機會），高於 70 為「超買」，約 50 為中性。'},
  dist_ma:{t:'距年線',d:'現價相對 200 日均線（俗稱年線）的差距。負值代表股價在年線之下，常被視為中期偏弱或處於回檔。'},
@@ -148,7 +149,7 @@ function rowCard(r,i){
     if(tags)card+=`<div class="row" style="gap:6px;margin-bottom:10px;flex-wrap:wrap">${tags}</div>`;
   }
   card+=`<div class="row" style="gap:10px">
-      <div class="metric"><div class="k term" data-term="pos">5年位階</div><div class="v mono" style="color:${r.pos<25?'var(--down)':'var(--text)'}">${fmt(r.pos,'%')}</div></div>
+      <div class="metric"><div class="k term" data-term="pos">${curCat==='market'?'3年位階':'5年位階'}</div><div class="v mono" style="color:${r.pos<25?'var(--down)':'var(--text)'}">${fmt(r.pos,'%')}</div></div>
       <div class="metric"><div class="k term" data-term="drawdown">距高點</div><div class="v mono">${fmt(r.drawdown,'%')}</div></div>
       <div class="metric"><div class="k term" data-term="rsi">RSI</div><div class="v mono" style="color:${r.rsi!=null&&r.rsi<30?'var(--down)':'var(--text)'}">${fmt(r.rsi)}</div></div>
       <div class="metric"><div class="k term" data-term="dist_ma">距年線</div><div class="v mono">${fmt(r.dist_ma,'%')}</div></div>
@@ -173,6 +174,7 @@ const CATS=[
  {k:'ai',n:'AI 供應鏈'},
  {k:'trad',n:'傳產原物料'},
  {k:'etf',n:'ETF'},
+ {k:'market',n:'⚡全上市低點'},
 ];
 let curCat='t50';
 function buildCats(){
@@ -201,16 +203,25 @@ $('fCyc').addEventListener('click',()=>{filt.cyc=!filt.cyc;$('fCyc').classList.t
 async function run(force){
   $('list').innerHTML='';$('loading').style.display='block';
   $('runLabel').textContent='掃描中';$('msg').style.display='none';
+  const isMarket=curCat==='market';
+  $('loadTxt').textContent=isMarket
+    ?'全上市掃描中，約 1–3 分鐘（抓全市場價格再初篩；首次喚醒服務會更久）'
+    :'運算中，約 30–90 秒（為避免限流會逐筆抓取，首次喚醒服務會更久）';
   try{
-    const r=await fetch('/api/screener?cat='+curCat+(force?'&force=1':''),{cache:'no-store'});
+    const url=isMarket?('/api/market'+(force?'?force=1':'')):('/api/screener?cat='+curCat+(force?'&force=1':''));
+    const r=await fetch(url,{cache:'no-store'});
     if(!r.ok)throw new Error('HTTP '+r.status);
     const d=await r.json();
     if(d.error)throw new Error(d.error);
     DATA=d.rows;
     curIsEtf=!!d.is_etf;
     $('etfNote').style.display=curIsEtf?'block':'none';
+    $('mktNote').style.display=(d.cat==='market')?'block':'none';
     const t=new Date();
-    $('updated').textContent='更新 '+t.toLocaleString('zh-TW',{hour12:false}).slice(5)+'　共 '+d.count+' 檔';
+    const ts='更新 '+t.toLocaleString('zh-TW',{hour12:false}).slice(5);
+    $('updated').textContent=(d.cat==='market')
+      ?(ts+'　掃描 '+d.scanned+' · 符合 '+d.passed+' 檔')
+      :(ts+'　共 '+d.count+' 檔');
     applyFilters();
   }catch(e){
     $('msg').style.display='block';$('msg').style.color='var(--down)';
