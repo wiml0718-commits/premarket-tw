@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0A0E1A">
+<title>盤前風向 · 台股開盤預判</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap');
+:root{
+  --bg:#0A0E1A; --panel:#111A2B; --panelHi:#16213A; --line:rgba(255,255,255,0.07);
+  --text:#E6EAF2; --muted:#79859B; --up:#FF3B47; --upDeep:#FF6168;
+  --down:#16C784; --downDeep:#3BE0A0; --amber:#F0B429; --d1:#E8843C; --d2:#C2447E;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:'Space Grotesk',system-ui,'PingFang TC','Noto Sans TC',sans-serif;-webkit-font-smoothing:antialiased}
+.wrap{max-width:440px;margin:0 auto;padding:18px 16px 40px}
+.mono{font-family:'JetBrains Mono',monospace;font-variant-numeric:tabular-nums}
+input{font-family:'JetBrains Mono',monospace}
+input:focus-visible,button:focus-visible{outline:2px solid var(--d1);outline-offset:2px}
+.row{display:flex;align-items:center}
+.between{justify-content:space-between}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:16px}
+.st{font-size:12.5px;font-weight:600;color:var(--muted);letter-spacing:.5px;margin:0 2px 10px}
+.chip{display:inline-flex;align-items:center;gap:5px;padding:5px 10px;border-radius:999px;background:var(--panel);border:1px solid var(--line);color:var(--text);font-size:12px;cursor:pointer}
+.chip b{color:var(--d1);font-weight:700}
+.num{width:64px;text-align:right;background:var(--panelHi);border:1px solid var(--line);border-radius:9px;color:var(--text);padding:9px 8px;font-size:15px}
+.pct{color:var(--muted);font-size:13px;width:12px;margin-left:4px}
+.frow{display:flex;align-items:center;gap:12px;padding:11px 10px;border-bottom:1px solid var(--line)}
+.frow:last-child{border-bottom:none}
+.flabel{font-size:14px;font-weight:500}
+.fhint{font-size:11px;color:var(--muted);margin-top:2px}
+.pulse{animation:pulse 2.4s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.55}}
+.marker{transition:left .5s cubic-bezier(.22,1,.36,1)}
+.bar{transition:width .5s cubic-bezier(.22,1,.36,1)}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+input::placeholder{color:var(--muted);opacity:.55}
+button{font-family:inherit}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- Header -->
+  <div class="row between" style="margin-bottom:16px">
+    <div class="row" style="gap:10px">
+      <div style="width:38px;height:38px;border-radius:11px;display:grid;place-items:center;background:linear-gradient(135deg,var(--d1),var(--d2))">
+        <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="#0A0E1A" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 2v2M5 5l1.5 1.5M2 12h2M20 12h2M17.5 6.5L19 5M3 18h18M4 22h16M8 18a4 4 0 0 1 8 0"/></svg>
+      </div>
+      <div>
+        <div style="font-weight:700;font-size:17px;letter-spacing:.3px">盤前風向</div>
+        <div class="mono" id="date" style="font-size:11px;color:var(--muted)"></div>
+      </div>
+    </div>
+    <div class="row" id="pill" style="gap:6px;padding:7px 11px;border-radius:999px;background:var(--panel);border:1px solid #79859b33">
+      <span id="pillDot" style="width:9px;height:9px;border-radius:999px;background:var(--muted)"></span>
+      <span id="pillText" style="color:var(--muted);font-weight:700;font-size:13px">等待更新</span>
+    </div>
+  </div>
+
+  <!-- Countdown -->
+  <div class="row" style="gap:8px;margin-bottom:18px;color:var(--muted);font-size:12px">
+    <span id="cLabel">距開盤</span>
+    <span class="mono pulse" id="cTxt" style="color:var(--d1);font-weight:700;font-size:13px"></span>
+    <span style="margin-left:auto">台股 09:00 開盤</span>
+  </div>
+
+  <!-- Inputs -->
+  <div class="row between st"><span>輸入今早數據</span>
+    <span style="display:flex;gap:8px">
+      <button class="chip" id="btnDemo"><b>✦</b> 示範</button>
+      <button class="chip" id="btnClear"><b>↺</b> 清除</button>
+    </span>
+  </div>
+
+  <!-- 自動更新 -->
+  <div class="panel" style="padding:14px;margin-bottom:12px">
+    <div class="row" style="gap:8px">
+      <span style="font-weight:600;font-size:14px">自動更新</span>
+      <span class="mono" id="upAt" style="margin-left:auto;font-size:11px;color:var(--muted)"></span>
+      <button id="btnRefresh" style="display:flex;align-items:center;gap:6px;padding:9px 16px;border-radius:9px;border:none;background:linear-gradient(135deg,var(--d1),var(--d2));color:#0A0E1A;font-weight:700;font-size:13px;cursor:pointer">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#0A0E1A" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6"/></svg>
+        <span id="refreshLabel">更新</span>
+      </button>
+    </div>
+    <div id="autoMsg" style="margin-top:8px;font-size:11.5px;color:var(--muted)">開啟即自動抓取最新數據。</div>
+  </div>
+
+  <!-- ADR -->
+  <div class="panel" style="padding:14px;margin-bottom:12px">
+    <div class="row between"><span style="font-weight:600;font-size:14px">台積電 ADR 隔夜漲跌</span>
+      <span class="mono" id="adrTop" style="font-weight:700"></span>
+    </div>
+    <div class="row" style="gap:10px;margin-top:12px">
+      <div style="flex:1"><div style="font-size:11px;color:var(--muted);line-height:1.5">換算台幣後相對前一交易日的漲跌。台股開盤傾向追這個走勢，是最強領先指標。</div></div>
+      <div class="row"><input class="num" id="adr" inputmode="decimal" placeholder="0.0" style="width:70px"><span class="pct">%</span></div>
+    </div>
+    <div class="mono" id="adrInfo" style="margin-top:10px;font-size:11.5px;color:var(--muted);line-height:1.6"></div>
+  </div>
+
+  <!-- 4 factors -->
+  <div class="panel" style="padding:6px;margin-bottom:18px" id="factorBox"></div>
+
+  <!-- Verdict -->
+  <div class="st">開盤預判</div>
+  <div id="vCard" class="panel" style="padding:20px 18px;margin-bottom:18px">
+    <div class="row between" style="align-items:baseline">
+      <div class="row" style="gap:9px">
+        <span id="vArrow" style="font-size:24px;color:var(--muted)">–</span>
+        <span id="vText" style="font-size:26px;font-weight:700;color:var(--muted)">等待更新</span>
+      </div>
+      <div style="text-align:right">
+        <div style="font-size:11px;color:var(--muted)">預估跳空</div>
+        <div class="mono" id="vGap" style="font-size:22px;font-weight:700;color:var(--muted)">—</div>
+      </div>
+    </div>
+    <div style="margin-top:20px;position:relative">
+      <div style="height:10px;border-radius:999px;background:linear-gradient(90deg,var(--downDeep),var(--down) 28%,var(--amber) 50%,var(--up) 72%,var(--upDeep))"></div>
+      <div class="marker" id="meter" style="position:absolute;top:-4px;left:50%;transform:translateX(-50%)">
+        <div style="width:18px;height:18px;border-radius:999px;background:#fff;border:4px solid var(--muted);box-shadow:0 2px 8px rgba(0,0,0,.5)"></div>
+      </div>
+      <div class="mono row between" style="margin-top:9px;font-size:10.5px;color:var(--muted)">
+        <span>強空</span><span>空</span><span>中性</span><span>多</span><span>強多</span>
+      </div>
+    </div>
+    <div class="row" id="confRow" style="margin-top:16px;padding-top:14px;border-top:1px solid var(--line);gap:7px;display:none">
+      <span id="confDot" style="width:7px;height:7px;border-radius:999px;background:var(--muted)"></span>
+      <span id="confText" style="font-size:12.5px;color:var(--muted)"></span>
+      <span class="mono" id="scoreText" style="margin-left:auto;font-size:12px;color:var(--muted)"></span>
+    </div>
+  </div>
+
+  <!-- Breakdown -->
+  <div class="st">各因子貢獻</div>
+  <div class="panel" style="padding:10px 14px 14px;margin-bottom:20px">
+    <div id="bars"></div>
+    <div style="font-size:11px;color:var(--muted);margin-top:10px;line-height:1.6">權重：ADR 30 · SOX 25 · NQ期 20 · 亞股 15 · SP期 10。未填欄位會自動排除並重新分配權重。</div>
+  </div>
+
+  <!-- Disclaimer -->
+  <div class="row" style="gap:9px;padding:13px;background:rgba(240,180,41,0.06);border:1px solid #f0b42922;border-radius:14px">
+    <span style="color:var(--amber);flex-shrink:0">ⓘ</span>
+    <div style="font-size:11.5px;color:var(--muted);line-height:1.7">本工具僅預判<b style="color:var(--text)">開盤方向與情緒</b>，非全天走勢，開高走低/開低走高很常見。<b style="color:var(--text)">僅供參考，非投資建議</b>，請自行判斷風險。資料約 15 分鐘延遲。</div>
+  </div>
+
+</div>
+
+<script>
+const FACTORS=[
+ {key:'adr',label:'台積電 ADR 隔夜漲跌',weight:30,div:2.0,computed:true},
+ {key:'sox',label:'費城半導體 SOX',weight:25,div:2.0,hint:'台股是半導體供應鏈，連動常比大盤更強。'},
+ {key:'ndxf',label:'那斯達克 100 期貨',weight:20,div:1.5,hint:'盤前電子盤漲跌，反映此刻最新情緒。'},
+ {key:'spxf',label:'S&P 500 期貨',weight:10,div:1.2,hint:'大盤整體風向。'},
+ {key:'asia',label:'亞股早盤（日經/韓）',weight:15,div:1.5,hint:'約 8 點開盤，可作即時佐證。'},
+];
+const state={adr:'',sox:'',ndxf:'',spxf:'',asia:'',adrPrice:null,fx:null,tsmcTw:null};
+const $=id=>document.getElementById(id);
+const nn=v=>{const x=parseFloat(v);return isNaN(x)?null:x;};
+const clamp=x=>Math.max(-1,Math.min(1,x));
+
+// build factor inputs
+$('factorBox').innerHTML=FACTORS.filter(f=>!f.computed).map(f=>`
+  <div class="frow">
+    <div style="flex:1"><div class="flabel">${f.label}</div><div class="fhint">${f.hint}</div></div>
+    <div class="row"><input class="num" id="${f.key}" inputmode="decimal" placeholder="0.0"><span class="pct">%</span></div>
+  </div>`).join('');
+
+// wire inputs
+['adr','sox','ndxf','spxf','asia'].forEach(k=>{
+  $(k).addEventListener('input',e=>{state[k]=e.target.value;render();});
+});
+
+function model(){
+  let W=0;
+  const parts=FACTORS.map(f=>{
+    const v=nn(state[f.key]);
+    if(v==null)return{...f,value:null,signal:0,contrib:0};
+    const signal=clamp(v/f.div);W+=f.weight;
+    return{...f,value:v,signal,contrib:f.weight*signal};
+  });
+  if(W===0)return{score:null,parts:parts.map(p=>({...p,norm:null})),n:0,agree:null};
+  const score=parts.reduce((s,p)=>s+p.contrib,0)/W;
+  const np=parts.map(p=>({...p,norm:p.value==null?null:(p.weight/W)*p.signal}));
+  const absSum=np.reduce((s,p)=>s+Math.abs(p.norm||0),0);
+  const agree=absSum===0?0:Math.abs(score)/absSum;
+  return{score,parts:np,n:parts.filter(p=>p.value!=null).length,agree};
+}
+function verdict(s){
+  if(s==null)return{t:'等待更新',c:'var(--muted)',a:'–'};
+  if(s>0.4)return{t:'強力偏多',c:'var(--up)',a:'▲'};
+  if(s>0.15)return{t:'偏多',c:'var(--up)',a:'▲'};
+  if(s>=-0.15)return{t:'中性 · 震盪',c:'var(--amber)',a:'—'};
+  if(s>=-0.4)return{t:'偏空',c:'var(--down)',a:'▼'};
+  return{t:'強力偏空',c:'var(--down)',a:'▼'};
+}
+function render(){
+  const m=model(),v=verdict(m.score);
+  // pill
+  $('pillDot').style.background=v.c;$('pillText').style.color=v.c;$('pillText').textContent=v.t;
+  $('pill').style.borderColor=m.score==null?'#79859b33':v.c+'55';
+  // ADR top + info
+  const adrv=nn(state.adr);
+  $('adrTop').textContent=adrv==null?'':(adrv>=0?'+':'')+adrv.toFixed(2)+'%';
+  $('adrTop').style.color=adrv==null?'var(--muted)':(adrv>=0?'var(--up)':'var(--down)');
+  let info='';
+  if(state.adrPrice!=null)info+='ADR $'+state.adrPrice+'　匯率 '+state.fx;
+  if(adrv!=null&&state.tsmcTw!=null){const open=state.tsmcTw*(1+adrv/100);info+=(info?'<br>':'')+'推估台積電開盤 ≈ NT$'+open.toFixed(0)+'（前收 '+state.tsmcTw+'）';}
+  $('adrInfo').innerHTML=info;
+  // verdict card
+  $('vArrow').textContent=v.a;$('vArrow').style.color=v.c;
+  $('vText').textContent=v.t;$('vText').style.color=v.c;
+  const gap=m.score==null?null:m.score*1.3;
+  $('vGap').textContent=gap==null?'—':(gap>=0?'+':'')+gap.toFixed(2)+'%';
+  $('vGap').style.color=gap==null?'var(--muted)':(gap>=0?'var(--up)':'var(--down)');
+  const pos=m.score==null?50:((clamp(m.score)+1)/2)*100;
+  $('meter').style.left=pos+'%';
+  $('meter').firstElementChild.style.borderColor=v.c;
+  $('vCard').style.borderColor=m.score==null?'var(--line)':v.c+'2A';
+  $('vCard').style.boxShadow=m.score==null?'none':'0 0 40px '+v.c+'14';
+  // confidence
+  if(m.score==null){$('confRow').style.display='none';}
+  else{
+    $('confRow').style.display='flex';
+    let ct,cc;
+    if(m.n<2){ct='資料不足';cc='var(--muted)';}
+    else if(m.agree>0.7){ct='訊號一致 · 可靠度較高';cc='var(--text)';}
+    else if(m.agree>0.4){ct='訊號普通';cc='var(--amber)';}
+    else{ct='訊號分歧 · 可靠度降低';cc='var(--down)';}
+    $('confDot').style.background=cc;$('confText').style.color=cc;$('confText').textContent=ct;
+    $('scoreText').textContent='綜合分 '+m.score.toFixed(2);
+  }
+  // bars
+  $('bars').innerHTML=m.parts.map(p=>{
+    const filled=p.value!=null;
+    const w=Math.min(Math.abs(p.norm||0)*100*2.2,50);
+    const positive=(p.norm||0)>=0;
+    const col=!filled?'var(--muted)':positive?'var(--up)':'var(--down)';
+    const valTxt=filled?((p.value>=0?'+':'')+p.value.toFixed(2)+'%'):'—';
+    return `<div style="padding:9px 0;border-bottom:1px solid var(--line)">
+      <div class="row between" style="margin-bottom:7px">
+        <span style="font-size:12.5px;color:${filled?'var(--text)':'var(--muted)'}">${p.label}</span>
+        <span class="mono" style="font-size:12px;color:${col}">${valTxt}</span>
+      </div>
+      <div style="position:relative;height:6px;background:var(--panelHi);border-radius:999px">
+        <div style="position:absolute;left:50%;top:-2px;bottom:-2px;width:1px;background:var(--line)"></div>
+        <div class="bar" style="position:absolute;top:0;bottom:0;border-radius:999px;background:${col};width:${w}%;${positive?'left':'right'}:50%"></div>
+      </div></div>`;
+  }).join('');
+}
+
+function setVal(k,v){const s=v==null?'':String(v);state[k]=s;if($(k))$(k).value=s;}
+async function refresh(){
+  $('refreshLabel').textContent='讀取中';$('autoMsg').textContent='連線中…（首次喚醒約需 50 秒，請稍候）';$('autoMsg').style.color='var(--muted)';
+  try{
+    const r=await fetch('/api/predict',{cache:'no-store'});
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    const d=await r.json();
+    setVal('adr',d.adr);setVal('sox',d.sox);setVal('ndxf',d.ndxf);setVal('spxf',d.spxf);setVal('asia',d.asia);
+    state.adrPrice=d.adr_price;state.fx=d.fx;state.tsmcTw=d.tsmc_tw;
+    const t=new Date();$('upAt').textContent='更新 '+String(t.getHours()).padStart(2,'0')+':'+String(t.getMinutes()).padStart(2,'0');
+    $('autoMsg').textContent='已帶入即時數據，下方可微調。';
+    render();
+  }catch(e){
+    $('autoMsg').textContent='抓取失敗：'+e.message+'。稍候再按一次更新。';$('autoMsg').style.color='var(--down)';
+  }finally{$('refreshLabel').textContent='更新';}
+}
+
+$('btnRefresh').addEventListener('click',refresh);
+$('btnDemo').addEventListener('click',()=>{
+  setVal('adr','0.9');setVal('sox','1.2');setVal('ndxf','0.6');setVal('spxf','0.4');setVal('asia','0.5');
+  state.adrPrice=423;state.fx=31.6;state.tsmcTw=2310;render();
+});
+$('btnClear').addEventListener('click',()=>{
+  ['adr','sox','ndxf','spxf','asia'].forEach(k=>setVal(k,''));
+  state.adrPrice=null;state.fx=null;state.tsmcTw=null;render();
+});
+
+// clock + countdown
+function tick(){
+  const now=new Date();
+  const wd=['日','一','二','三','四','五','六'][now.getDay()];
+  $('date').textContent=`${now.getMonth()+1}/${now.getDate()} ${wd} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+  const open=new Date(now);open.setHours(9,0,0,0);
+  let diff=open-now;
+  if(diff<0){$('cLabel').textContent=now.getHours()<14?'盤中':'已收盤';$('cTxt').textContent='';}
+  else{
+    $('cLabel').textContent='距開盤';
+    const h=Math.floor(diff/3.6e6),mi=Math.floor((diff%3.6e6)/6e4),s=Math.floor((diff%6e4)/1000);
+    $('cTxt').textContent=`${String(h).padStart(2,'0')}:${String(mi).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+  }
+}
+setInterval(tick,1000);tick();render();
+// auto-fetch on load
+refresh();
+</script>
+</body>
+</html>
