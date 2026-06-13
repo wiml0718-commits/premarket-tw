@@ -54,6 +54,7 @@ a{color:var(--d1);text-decoration:none}
   </div>
 
   <div id="cats" class="catrow"></div>
+  <div id="etfNote" style="display:none;font-size:11.5px;color:var(--muted);background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:9px 12px;margin-bottom:12px;line-height:1.6">ETF 是一籃子股票，以「價格位階＋技術」評分；基金無本益比、營收，故不顯示那幾欄。</div>
 
   <div class="panel" style="padding:12px 14px;margin-bottom:14px">
     <div class="row between">
@@ -79,7 +80,7 @@ a{color:var(--d1);text-decoration:none}
 
   <div id="list"></div>
   <div id="loading" style="display:none"><div class="spin"></div>
-    <div style="text-align:center;font-size:12px;color:var(--muted)">運算中，約 15–30 秒（首次喚醒服務會更久）</div>
+    <div style="text-align:center;font-size:12px;color:var(--muted)">運算中，約 30–90 秒（為避免限流會逐筆抓取，首次喚醒服務會更久）</div>
   </div>
 
   <div style="font-size:11px;color:var(--muted);margin-top:16px;line-height:1.6">
@@ -130,13 +131,7 @@ $('btnGloss').addEventListener('click',openGlossary);
 
 function rowCard(r,i){
   const sc=scoreColor(r.score);
-  let tags='';
-  if(r.cyclical)tags+=`<span class="tag" data-term="cyclical" style="background:#E8843C1F;color:var(--d1)">週期股·${r.cyclical}</span>`;
-  if(r.rev!=null&&r.rev<0)tags+=`<span class="tag" data-term="rev_tag" style="background:#FF3B471F;color:var(--up)">營收衰退</span>`;
-  else if(r.rev!=null&&r.rev>0)tags+=`<span class="tag" data-term="rev_tag" style="background:#6FA8FF1F;color:var(--hot)">營收成長</span>`;
-  const tagRow=tags?`<div class="row" style="gap:6px;margin-bottom:10px;flex-wrap:wrap">${tags}</div>`:'';
-  const revColor=r.rev==null?'var(--text)':(r.rev<0?'var(--up)':'var(--hot)');
-  return `<div class="card">
+  let card=`<div class="card">
     <div class="row" style="gap:11px;margin-bottom:11px">
       <div class="rank" style="background:${sc}22;color:${sc}">${i+1}</div>
       <div style="flex:1;min-width:0">
@@ -144,21 +139,31 @@ function rowCard(r,i){
         <div class="mono" style="font-size:12px;color:var(--muted)">NT$${r.price}</div>
       </div>
       <div class="scorebadge" data-term="score" style="background:${sc}1F;color:${sc};cursor:pointer">${r.score}</div>
-    </div>
-    ${tagRow}
-    <div class="row" style="gap:10px">
+    </div>`;
+  if(!curIsEtf){
+    let tags='';
+    if(r.cyclical)tags+=`<span class="tag" data-term="cyclical" style="background:#E8843C1F;color:var(--d1)">週期股·${r.cyclical}</span>`;
+    if(r.rev!=null&&r.rev<0)tags+=`<span class="tag" data-term="rev_tag" style="background:#FF3B471F;color:var(--up)">營收衰退</span>`;
+    else if(r.rev!=null&&r.rev>0)tags+=`<span class="tag" data-term="rev_tag" style="background:#6FA8FF1F;color:var(--hot)">營收成長</span>`;
+    if(tags)card+=`<div class="row" style="gap:6px;margin-bottom:10px;flex-wrap:wrap">${tags}</div>`;
+  }
+  card+=`<div class="row" style="gap:10px">
       <div class="metric"><div class="k term" data-term="pos">5年位階</div><div class="v mono" style="color:${r.pos<25?'var(--down)':'var(--text)'}">${fmt(r.pos,'%')}</div></div>
       <div class="metric"><div class="k term" data-term="drawdown">距高點</div><div class="v mono">${fmt(r.drawdown,'%')}</div></div>
       <div class="metric"><div class="k term" data-term="rsi">RSI</div><div class="v mono" style="color:${r.rsi!=null&&r.rsi<30?'var(--down)':'var(--text)'}">${fmt(r.rsi)}</div></div>
       <div class="metric"><div class="k term" data-term="dist_ma">距年線</div><div class="v mono">${fmt(r.dist_ma,'%')}</div></div>
-    </div>
-    <div class="row" style="gap:10px;margin-top:9px;padding-top:9px;border-top:1px solid var(--line)">
+    </div>`;
+  if(!curIsEtf){
+    const revColor=r.rev==null?'var(--text)':(r.rev<0?'var(--up)':'var(--hot)');
+    card+=`<div class="row" style="gap:10px;margin-top:9px;padding-top:9px;border-top:1px solid var(--line)">
       <div class="metric"><div class="k term" data-term="pe">本益比</div><div class="v mono">${fmt(r.pe)}</div></div>
       <div class="metric"><div class="k term" data-term="pb">股價淨值</div><div class="v mono">${fmt(r.pb)}</div></div>
       <div class="metric"><div class="k term" data-term="yld">殖利率</div><div class="v mono">${fmt(r.yld,'%')}</div></div>
       <div class="metric"><div class="k term" data-term="rev">營收YoY${r.rev_src?'('+r.rev_src+')':''}</div><div class="v mono" style="color:${revColor}">${fmt(r.rev,'%')}</div></div>
-    </div>
-  </div>`;
+    </div>`;
+  }
+  card+=`</div>`;
+  return card;
 }
 
 const CATS=[
@@ -167,7 +172,7 @@ const CATS=[
  {k:'fin',n:'金融股'},
  {k:'ai',n:'AI 供應鏈'},
  {k:'trad',n:'傳產原物料'},
- {k:'div',n:'高股息'},
+ {k:'etf',n:'ETF'},
 ];
 let curCat='t50';
 function buildCats(){
@@ -181,6 +186,7 @@ $('cats').addEventListener('click',e=>{
 });
 
 let DATA=[];
+let curIsEtf=false;
 const filt={growth:false,cyc:false};
 function applyFilters(){
   let rows=DATA.slice();
@@ -192,15 +198,17 @@ function applyFilters(){
 $('fGrowth').addEventListener('click',()=>{filt.growth=!filt.growth;$('fGrowth').classList.toggle('on',filt.growth);applyFilters();});
 $('fCyc').addEventListener('click',()=>{filt.cyc=!filt.cyc;$('fCyc').classList.toggle('on',filt.cyc);applyFilters();});
 
-async function run(){
+async function run(force){
   $('list').innerHTML='';$('loading').style.display='block';
   $('runLabel').textContent='掃描中';$('msg').style.display='none';
   try{
-    const r=await fetch('/api/screener?cat='+curCat,{cache:'no-store'});
+    const r=await fetch('/api/screener?cat='+curCat+(force?'&force=1':''),{cache:'no-store'});
     if(!r.ok)throw new Error('HTTP '+r.status);
     const d=await r.json();
     if(d.error)throw new Error(d.error);
     DATA=d.rows;
+    curIsEtf=!!d.is_etf;
+    $('etfNote').style.display=curIsEtf?'block':'none';
     const t=new Date();
     $('updated').textContent='更新 '+t.toLocaleString('zh-TW',{hour12:false}).slice(5)+'　共 '+d.count+' 檔';
     applyFilters();
@@ -209,7 +217,7 @@ async function run(){
     $('msg').textContent='掃描失敗：'+e.message+'。稍候再試一次。';
   }finally{$('loading').style.display='none';$('runLabel').textContent='掃描';}
 }
-$('btnRun').addEventListener('click',run);
+$('btnRun').addEventListener('click',()=>run(true));
 buildCats();
 run(); // 開啟即掃描
 </script>
