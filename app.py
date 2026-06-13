@@ -136,14 +136,12 @@ CATEGORIES = {
         "1605": "華新", "2105": "正新", "1402": "遠東新", "1722": "台肥",
         "1216": "統一", "1227": "佳格", "9904": "寶成", "9910": "豐泰",
     }},
-    "div": {"name": "高股息", "stocks": {
-        "2412": "中華電", "4904": "遠傳", "3045": "台灣大", "2357": "華碩",
-        "2376": "技嘉", "2603": "長榮", "2609": "陽明", "2880": "華南金",
-        "2881": "富邦金", "2882": "國泰金", "2884": "玉山金", "2885": "元大金",
-        "2886": "兆豐金", "2890": "永豐金", "2892": "第一金", "5880": "合庫金",
-        "2002": "中鋼", "1101": "台泥", "2105": "正新", "3034": "聯詠",
-        "2347": "聯強", "8454": "富邦媒", "9910": "豐泰", "2324": "仁寶",
-        "3702": "大聯大",
+    "etf": {"name": "ETF", "etf": True, "stocks": {
+        "0050": "元大台灣50", "006208": "富邦台50", "0056": "元大高股息",
+        "00878": "國泰永續高股息", "00919": "群益台灣精選高息", "00929": "復華台灣科技優息",
+        "00713": "元大台灣高息低波", "00940": "元大台灣價值高息", "00939": "統一台灣高息動能",
+        "0051": "元大中型100", "00692": "富邦公司治理", "00850": "元大臺灣ESG永續",
+        "00646": "元大S&P500", "00662": "富邦NASDAQ", "00757": "統一FANG+", "00733": "富邦臺灣中小",
     }},
 }
 
@@ -168,14 +166,39 @@ def _rsi(series, period=14):
     return float(v.iloc[-1]) if len(v) else None
 
 
+import time
+import threading
+
+_fm_lock = threading.Lock()  # 串行化 FinMind 呼叫，避免同一秒塞太多撞分鐘限制
+
+
+def finmind_get(params, tries=4):
+    """呼叫 FinMind，遇限流（402/429）自動退避重試。回傳 data list。"""
+    headers = {"Authorization": f"Bearer {FINMIND_TOKEN}"} if FINMIND_TOKEN else {}
+    for i in range(tries):
+        try:
+            with _fm_lock:
+                r = requests.get(FINMIND_URL, params=params, headers=headers, timeout=15)
+                time.sleep(0.4)  # 每次呼叫間隔，控制在分鐘上限內
+            if r.status_code in (402, 429):  # 限流
+                time.sleep(2 ** i + 1)        # 退避：3、4、6、10 秒
+                continue
+            j = r.json()
+            if isinstance(j, dict) and j.get("status") in (402, 429):
+                time.sleep(2 ** i + 1)
+                continue
+            return j.get("data", []) if isinstance(j, dict) else []
+        except Exception:
+            time.sleep(1.5)
+    return []
+
+
 def finmind_rev_growth(code):
     """台股月營收年增率（%）：最新月 vs 去年同月。抓不到回 None。"""
     try:
         start = (date.today() - timedelta(days=460)).isoformat()
-        headers = {"Authorization": f"Bearer {FINMIND_TOKEN}"} if FINMIND_TOKEN else {}
         params = {"dataset": "TaiwanStockMonthRevenue", "data_id": code, "start_date": start}
-        r = requests.get(FINMIND_URL, params=params, headers=headers, timeout=12)
-        rows = r.json().get("data", [])
+        rows = finmind_get(params)
         if not rows:
             return None
         for d in rows:
@@ -195,10 +218,8 @@ def _valuation(code):
     """FinMind 估值：本益比 PER、股價淨值比 PBR、殖利率（台股本地資料，覆蓋率高）。"""
     try:
         start = (date.today() - timedelta(days=14)).isoformat()
-        headers = {"Authorization": f"Bearer {FINMIND_TOKEN}"} if FINMIND_TOKEN else {}
         params = {"dataset": "TaiwanStockPER", "data_id": code, "start_date": start}
-        r = requests.get(FINMIND_URL, params=params, headers=headers, timeout=12)
-        rows = r.json().get("data", [])
+        rows = finmind_get(params)
         if not rows:
             return {"pe": None, "pb": None, "yld": None}
         rows.sort(key=lambda d: d["date"])
@@ -241,6 +262,7 @@ def screener(cat: str = "t50", force: int = 0):
         return _cache[key]
 
     stocks = CATEGORIES[cat]["stocks"]
+    is_etf = CATEGORIES[cat].get("etf", False)
     codes = list(stocks.keys())
     tickers = [c + ".TW" for c in codes]
 
@@ -252,11 +274,15 @@ def screener(cat: str = "t50", force: int = 0):
     except Exception as e:
         return {"error": f"price download failed: {e}", "rows": []}
 
-    # 平行抓估值與月營收年增率（皆 FinMind），每日只跑一次
-    with ThreadPoolExecutor(max_workers=10) as ex:
-        vals = list(ex.map(_valuation, codes))
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        revs = list(ex.map(finmind_rev_growth, codes))
+    # 平行抓估值與月營收年增率（皆 FinMind）。ETF 是基金、無估值/營收，直接略過、省額度
+    if is_etf:
+        vals = [{"pe": None, "pb": None, "yld": None} for _ in codes]
+        revs = [None for _ in codes]
+    else:
+        with ThreadPoolExecutor(max_workers=10) as ex:
+            vals = list(ex.map(_valuation, codes))
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            revs = list(ex.map(finmind_rev_growth, codes))
     revmap = {codes[i]: revs[i] for i in range(len(codes))}
 
     rows = []
@@ -318,7 +344,7 @@ def screener(cat: str = "t50", force: int = 0):
 
     rows.sort(key=lambda r: r["score"], reverse=True)
     result = {"updated": datetime.now(timezone.utc).isoformat(),
-              "cat": cat, "cat_name": CATEGORIES[cat]["name"],
+              "cat": cat, "cat_name": CATEGORIES[cat]["name"], "is_etf": is_etf,
               "count": len(rows), "rows": rows}
     _cache[key] = result
     return result
