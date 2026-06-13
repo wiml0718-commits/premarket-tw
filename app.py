@@ -13,15 +13,20 @@
   uvicorn app:app --reload --port 8000
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date, timedelta
 from concurrent.futures import ThreadPoolExecutor
 import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import yfinance as yf
+import requests
 
 BASE = os.path.dirname(os.path.abspath(__file__))
+
+# FinMind：台股月營收年增率（更即時準確）。token 可選，註冊後設環境變數 FINMIND_TOKEN 可提高用量上限。
+FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
+FINMIND_TOKEN = os.environ.get("FINMIND_TOKEN", "").strip()
 
 app = FastAPI(title="premarket-tw")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -100,6 +105,14 @@ STOCKS = {
 
 _cache = {}  # {date: result}
 
+# 週期股標記：這些類股「便宜」常是因為景氣下行，本益比低反而可能是獲利高點（本益比陷阱）
+CYCLICAL = {
+    "2603": "航運", "2609": "航運", "2615": "航運",
+    "2002": "鋼鐵",
+    "1301": "塑化", "1303": "塑化", "1326": "塑化", "6505": "塑化",
+    "1101": "水泥",
+}
+
 
 def _rsi(series, period=14):
     delta = series.diff()
@@ -111,6 +124,29 @@ def _rsi(series, period=14):
     return float(v.iloc[-1]) if len(v) else None
 
 
+def finmind_rev_growth(code):
+    """台股月營收年增率（%）：最新月 vs 去年同月。抓不到回 None。"""
+    try:
+        start = (date.today() - timedelta(days=460)).isoformat()
+        headers = {"Authorization": f"Bearer {FINMIND_TOKEN}"} if FINMIND_TOKEN else {}
+        params = {"dataset": "TaiwanStockMonthRevenue", "data_id": code, "start_date": start}
+        r = requests.get(FINMIND_URL, params=params, headers=headers, timeout=12)
+        rows = r.json().get("data", [])
+        if not rows:
+            return None
+        for d in rows:
+            d["_k"] = int(d["revenue_year"]) * 100 + int(d["revenue_month"])
+        rows.sort(key=lambda d: d["_k"])
+        latest = rows[-1]
+        yoy_key = (int(latest["revenue_year"]) - 1) * 100 + int(latest["revenue_month"])
+        prev = next((d for d in rows if d["_k"] == yoy_key), None)
+        if not prev or not prev.get("revenue"):
+            return None
+        return round((latest["revenue"] / prev["revenue"] - 1) * 100, 1)
+    except Exception:
+        return None
+
+
 def _valuation(code):
     """best-effort 抓本益比/股價淨值比/殖利率。"""
     try:
@@ -118,9 +154,10 @@ def _valuation(code):
         y = info.get("dividendYield")
         if y is not None and y < 1:  # yfinance 有時回小數
             y = y * 100
-        return {"pe": info.get("trailingPE"), "pb": info.get("priceToBook"), "yld": y}
+        return {"pe": info.get("trailingPE"), "pb": info.get("priceToBook"),
+                "yld": y, "rev": info.get("revenueGrowth")}
     except Exception:
-        return {"pe": None, "pb": None, "yld": None}
+        return {"pe": None, "pb": None, "yld": None, "rev": None}
 
 
 def _rank_scores(values, higher_better):
@@ -154,9 +191,12 @@ def screener(force: int = 0):
     except Exception as e:
         return {"error": f"price download failed: {e}", "rows": []}
 
-    # 平行抓估值（每日只跑一次）
+    # 平行抓估值（yfinance）與月營收年增率（FinMind），每日只跑一次
     with ThreadPoolExecutor(max_workers=10) as ex:
         vals = list(ex.map(_valuation, codes))
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        revs = list(ex.map(finmind_rev_growth, codes))
+    revmap = {codes[i]: revs[i] for i in range(len(codes))}
 
     rows = []
     for code in codes:
@@ -192,6 +232,15 @@ def screener(force: int = 0):
         r["pe"] = round(v["pe"], 1) if v["pe"] else None
         r["pb"] = round(v["pb"], 2) if v["pb"] else None
         r["yld"] = round(v["yld"], 2) if v["yld"] else None
+        rv_fm = revmap.get(r["code"])
+        if rv_fm is not None:
+            r["rev"] = rv_fm
+            r["rev_src"] = "月"
+        else:
+            rv = v.get("rev")
+            r["rev"] = round(rv * 100, 1) if isinstance(rv, (int, float)) else None
+            r["rev_src"] = "季" if r["rev"] is not None else None
+        r["cyclical"] = CYCLICAL.get(r["code"])
 
         # 子分數（越接近低點/越便宜越高）
         price_score = 100 - r["pos"]                      # 位階越低分越高
