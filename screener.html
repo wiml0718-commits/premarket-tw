@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0A0E1A">
+<title>低點選股 · 0050</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap');
+:root{--bg:#0A0E1A;--panel:#111A2B;--panelHi:#16213A;--line:rgba(255,255,255,0.07);
+--text:#E6EAF2;--muted:#79859B;--up:#FF3B47;--down:#16C784;--amber:#F0B429;--d1:#E8843C;--d2:#C2447E;--hot:#6FA8FF}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+body{background:var(--bg);color:var(--text);font-family:'Space Grotesk',system-ui,'PingFang TC','Noto Sans TC',sans-serif;-webkit-font-smoothing:antialiased}
+.wrap{max-width:480px;margin:0 auto;padding:18px 14px 40px}
+.mono{font-family:'JetBrains Mono',monospace;font-variant-numeric:tabular-nums}
+a{color:var(--d1);text-decoration:none}
+.row{display:flex;align-items:center}
+.between{justify-content:space-between}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px}
+.btn{display:flex;align-items:center;gap:6px;padding:9px 15px;border-radius:9px;border:none;background:linear-gradient(135deg,var(--d1),var(--d2));color:#0A0E1A;font-weight:700;font-size:13px;cursor:pointer;font-family:inherit}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:13px 14px;margin-bottom:10px}
+.rank{width:26px;height:26px;border-radius:8px;display:grid;place-items:center;font-weight:700;font-size:13px;flex-shrink:0}
+.metric{flex:1;min-width:0}
+.metric .k{font-size:10px;color:var(--muted);margin-bottom:2px}
+.metric .v{font-size:13px;font-weight:600}
+.scorebadge{padding:4px 9px;border-radius:8px;font-weight:700;font-size:14px}
+.spin{width:34px;height:34px;border:3px solid var(--line);border-top-color:var(--d1);border-radius:50%;animation:sp 1s linear infinite;margin:30px auto}
+@keyframes sp{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.spin{animation:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="row between" style="margin-bottom:6px">
+    <div style="font-size:19px;font-weight:700">低點選股 · 0050</div>
+    <a href="/" style="font-size:13px">← 盤前風向</a>
+  </div>
+  <div style="font-size:12px;color:var(--muted);margin-bottom:14px">綜合分數越高 = 越接近相對低點（價格位階40 + 技術30 + 估值30）</div>
+
+  <div class="panel" style="padding:12px 14px;margin-bottom:14px">
+    <div class="row between">
+      <span class="mono" id="updated" style="font-size:11.5px;color:var(--muted)">尚未掃描</span>
+      <button class="btn" id="btnRun">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#0A0E1A" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6"/></svg>
+        <span id="runLabel">掃描</span>
+      </button>
+    </div>
+    <div id="msg" style="margin-top:8px;font-size:11.5px;color:var(--muted);display:none"></div>
+  </div>
+
+  <!-- 風險提醒 -->
+  <div class="row" style="gap:9px;padding:12px;background:rgba(240,180,41,0.06);border:1px solid #f0b42922;border-radius:12px;margin-bottom:16px">
+    <span style="color:var(--amber);flex-shrink:0">ⓘ</span>
+    <div style="font-size:11.5px;color:var(--muted);line-height:1.65"><b style="color:var(--text)">「低點」不等於「該買」。</b>有些股票便宜是因為基本面轉壞（價值陷阱），這份清單只是<b style="color:var(--text)">研究起點</b>，不是買進建議。請務必再查公司營運與財報。非投資建議。</div>
+  </div>
+
+  <div id="list"></div>
+  <div id="loading" style="display:none"><div class="spin"></div>
+    <div style="text-align:center;font-size:12px;color:var(--muted)">運算中，約 15–30 秒（首次喚醒服務會更久）</div>
+  </div>
+
+  <div style="font-size:11px;color:var(--muted);margin-top:16px;line-height:1.6">
+    成分股每季換股，清單為種子版本可自行更新。估值為目前跨股比較，下一步可升級成「相對自身歷史」。資料約 15 分鐘延遲。
+  </div>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+function scoreColor(s){
+  // 0~100 → 灰到亮藍（資訊性，不用紅綠以免暗示好壞）
+  if(s>=75)return'var(--hot)';
+  if(s>=60)return'#8FB8E8';
+  if(s>=45)return'#7C879B';
+  return'#5A6478';
+}
+function fmt(v,suf=''){return v==null?'—':v+suf;}
+
+function rowCard(r,i){
+  const sc=scoreColor(r.score);
+  return `<div class="card">
+    <div class="row" style="gap:11px;margin-bottom:11px">
+      <div class="rank" style="background:${sc}22;color:${sc}">${i+1}</div>
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:700;font-size:15px">${r.name} <span class="mono" style="color:var(--muted);font-size:12px;font-weight:500">${r.code}</span></div>
+        <div class="mono" style="font-size:12px;color:var(--muted)">NT$${r.price}</div>
+      </div>
+      <div class="scorebadge" style="background:${sc}1F;color:${sc}">${r.score}</div>
+    </div>
+    <div class="row" style="gap:10px">
+      <div class="metric"><div class="k">5年位階</div><div class="v mono" style="color:${r.pos<25?'var(--down)':'var(--text)'}">${fmt(r.pos,'%')}</div></div>
+      <div class="metric"><div class="k">距高點</div><div class="v mono">${fmt(r.drawdown,'%')}</div></div>
+      <div class="metric"><div class="k">RSI</div><div class="v mono" style="color:${r.rsi!=null&&r.rsi<30?'var(--down)':'var(--text)'}">${fmt(r.rsi)}</div></div>
+      <div class="metric"><div class="k">距年線</div><div class="v mono">${fmt(r.dist_ma,'%')}</div></div>
+    </div>
+    <div class="row" style="gap:10px;margin-top:9px;padding-top:9px;border-top:1px solid var(--line)">
+      <div class="metric"><div class="k">本益比</div><div class="v mono">${fmt(r.pe)}</div></div>
+      <div class="metric"><div class="k">股價淨值</div><div class="v mono">${fmt(r.pb)}</div></div>
+      <div class="metric"><div class="k">殖利率</div><div class="v mono">${fmt(r.yld,'%')}</div></div>
+      <div class="metric"></div>
+    </div>
+  </div>`;
+}
+
+async function run(){
+  $('list').innerHTML='';$('loading').style.display='block';
+  $('runLabel').textContent='掃描中';$('msg').style.display='none';
+  try{
+    const r=await fetch('/api/screener',{cache:'no-store'});
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    const d=await r.json();
+    if(d.error)throw new Error(d.error);
+    const t=new Date();
+    $('updated').textContent='更新 '+t.toLocaleString('zh-TW',{hour12:false}).slice(5)+'　共 '+d.count+' 檔';
+    $('list').innerHTML=d.rows.map(rowCard).join('');
+  }catch(e){
+    $('msg').style.display='block';$('msg').style.color='var(--down)';
+    $('msg').textContent='掃描失敗：'+e.message+'。稍候再試一次。';
+  }finally{$('loading').style.display='none';$('runLabel').textContent='掃描';}
+}
+$('btnRun').addEventListener('click',run);
+run(); // 開啟即掃描
+</script>
+</body>
+</html>
