@@ -153,7 +153,21 @@ CATEGORIES = {
     }},
 }
 
-_cache = {}  # {"date:cat": result}
+_cache = {}  # {"date:cat" 或 "date:all:mode": result}
+
+# 全部觀察池：六類去重合併，但排除 ETF（基金無估值/營收）。代號→名稱
+ALL_POOL = {}
+for _c in CATEGORIES.values():
+    if _c.get("etf"):
+        continue
+    for _code, _name in _c["stocks"].items():
+        ALL_POOL.setdefault(_code, _name)
+
+# 「全部」模式的篩選門檻（AND）
+THRESH = {
+    "strict": {"pos": 25, "rsi": 40, "drawdown": -30},
+    "loose":  {"pos": 40, "rsi": 50, "drawdown": -20},
+}
 
 # 週期股標記：這些類股「便宜」常是因為景氣下行，本益比低反而可能是獲利高點（本益比陷阱）
 CYCLICAL = {
@@ -397,6 +411,103 @@ def market(force: int = 0, n: int = 200):
     rows.sort(key=lambda r: r["score"], reverse=True)
     result = {"updated": datetime.now(timezone.utc).isoformat(),
               "cat": "market", "cat_name": "全上市低點", "is_etf": False,
+              "scanned": len(codes), "passed": len(rows),
+              "count": len(rows), "rows": rows}
+    _cache[key] = result
+    return result
+
+
+@app.get("/api/all")
+def scan_all(force: int = 0, mode: str = "strict"):
+    """全部觀察池低點掃描：先價格/技術初篩（嚴格/放寬），通過的才補估值與營收。"""
+    if mode not in THRESH:
+        mode = "strict"
+    th = THRESH[mode]
+    today = datetime.now().strftime("%Y-%m-%d")
+    key = f"{today}:all:{mode}"
+    if not force and key in _cache:
+        return _cache[key]
+
+    codes = list(ALL_POOL.keys())
+    tickers = [c + ".TW" for c in codes]
+    try:
+        raw = yf.download(tickers, period="3y", interval="1d",
+                          progress=False, group_by="column", threads=True)
+        close = raw["Close"] if "Close" in raw else raw
+    except Exception as e:
+        return {"error": f"price download failed: {e}", "rows": []}
+
+    # 第一層：價格/技術初篩（AND 門檻）
+    prelim = []
+    for code in codes:
+        t = code + ".TW"
+        try:
+            s = close[t].dropna() if t in close else None
+        except Exception:
+            s = None
+        if s is None or len(s) < 60:
+            continue
+        last = float(s.iloc[-1]); hi = float(s.max()); lo = float(s.min())
+        pos = (last - lo) / (hi - lo) * 100 if hi > lo else 50
+        ma200 = float(s.rolling(200).mean().dropna().iloc[-1]) if len(s) >= 200 else None
+        dist_ma = (last / ma200 - 1) * 100 if ma200 else None
+        rsi = _rsi(s)
+        dd = (last / hi - 1) * 100
+        if pos >= th["pos"]:
+            continue
+        if rsi is None or rsi >= th["rsi"]:
+            continue
+        if dd >= th["drawdown"]:
+            continue
+        prelim.append({"code": code, "name": ALL_POOL[code], "price": round(last, 2),
+                       "pos": round(pos, 1), "drawdown": round(dd, 1),
+                       "rsi": round(rsi, 1),
+                       "dist_ma": round(dist_ma, 1) if dist_ma is not None else None})
+
+    # 第二層：估值＋營收（皆 FinMind，僅通過者）
+    surv = [r["code"] for r in prelim]
+    vals, revmap = {}, {}
+    if surv:
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            vlist = list(ex.map(_valuation, surv))
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            rlist = list(ex.map(finmind_rev_growth, surv))
+        vals = {surv[i]: vlist[i] for i in range(len(surv))}
+        revmap = {surv[i]: rlist[i] for i in range(len(surv))}
+
+    pe_s = _rank_scores([vals.get(r["code"], {}).get("pe") for r in prelim], False)
+    pb_s = _rank_scores([vals.get(r["code"], {}).get("pb") for r in prelim], False)
+    yl_s = _rank_scores([vals.get(r["code"], {}).get("yld") for r in prelim], True)
+
+    rows = []
+    for idx, r in enumerate(prelim):
+        v = vals.get(r["code"], {})
+        r["pe"] = round(v["pe"], 1) if v.get("pe") else None
+        r["pb"] = round(v["pb"], 2) if v.get("pb") else None
+        r["yld"] = round(v["yld"], 2) if v.get("yld") else None
+        rv = revmap.get(r["code"])
+        r["rev"] = rv
+        r["rev_src"] = "月" if rv is not None else None
+        r["cyclical"] = CYCLICAL.get(r["code"])
+
+        price_score = 100 - r["pos"]
+        rsi_score = max(0, min(100, (60 - r["rsi"]) / 40 * 100)) if r["rsi"] is not None else None
+        ma_score = max(0, min(100, (-r["dist_ma"]) / 20 * 100)) if r["dist_ma"] is not None else None
+        tp = [x for x in (rsi_score, ma_score) if x is not None]
+        tech = sum(tp) / len(tp) if tp else None
+        vp = [x for x in (pe_s[idx], pb_s[idx], yl_s[idx]) if x is not None]
+        val = sum(vp) / len(vp) if vp else None
+        cp = []
+        if price_score is not None: cp.append((0.40, price_score))
+        if tech is not None: cp.append((0.30, tech))
+        if val is not None: cp.append((0.30, val))
+        ws = sum(w for w, _ in cp)
+        r["score"] = round(sum(w * x for w, x in cp) / ws, 1) if ws else 0
+        rows.append(r)
+
+    rows.sort(key=lambda r: r["score"], reverse=True)
+    result = {"updated": datetime.now(timezone.utc).isoformat(),
+              "cat": "all", "cat_name": "全部低點", "is_etf": False, "mode": mode,
               "scanned": len(codes), "passed": len(rows),
               "count": len(rows), "rows": rows}
     _cache[key] = result
