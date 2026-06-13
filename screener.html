@@ -30,6 +30,10 @@ a{color:var(--d1);text-decoration:none}
 .tag{padding:3px 8px;border-radius:7px;font-size:11px;font-weight:600;cursor:pointer}
 .k.term{border-bottom:1px dashed rgba(255,255,255,0.22);display:inline-block;padding-bottom:1px;cursor:pointer}
 .glossbtn{display:inline-flex;align-items:center;gap:5px;padding:6px 11px;border-radius:999px;border:1px solid var(--line);background:var(--panelHi);color:var(--text);font-size:12px;font-family:inherit;cursor:pointer}
+.catrow{display:flex;gap:8px;overflow-x:auto;-webkit-overflow-scrolling:touch;margin-bottom:14px;padding-bottom:3px}
+.catrow::-webkit-scrollbar{display:none}
+.cat{flex:0 0 auto;padding:8px 14px;border-radius:999px;border:1px solid var(--line);background:var(--panelHi);color:var(--muted);font-size:13px;font-family:inherit;cursor:pointer;white-space:nowrap}
+.cat.on{background:linear-gradient(135deg,var(--d1),var(--d2));border-color:transparent;color:#0A0E1A;font-weight:700}
 .spin{width:34px;height:34px;border:3px solid var(--line);border-top-color:var(--d1);border-radius:50%;animation:sp 1s linear infinite;margin:30px auto}
 @keyframes sp{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion:reduce){.spin{animation:none}}
@@ -39,7 +43,7 @@ a{color:var(--d1);text-decoration:none}
 <div class="wrap">
 
   <div class="row between" style="margin-bottom:6px">
-    <div style="font-size:19px;font-weight:700">低點選股 · 0050</div>
+    <div style="font-size:19px;font-weight:700">低點選股 · <span id="catName">0050 權值股</span></div>
     <a href="/" style="font-size:13px">← 盤前風向</a>
   </div>
   <div style="font-size:12px;color:var(--muted);margin-bottom:10px">綜合分數越高 = 越接近相對低點（價格位階40 + 技術30 + 估值30）</div>
@@ -48,6 +52,8 @@ a{color:var(--d1);text-decoration:none}
     <button class="glossbtn" id="btnGloss">📖 名詞解釋</button>
     <span style="font-size:11.5px;color:var(--muted)">點卡片任一名詞也能看解釋</span>
   </div>
+
+  <div id="cats" class="catrow"></div>
 
   <div class="panel" style="padding:12px 14px;margin-bottom:14px">
     <div class="row between">
@@ -155,6 +161,25 @@ function rowCard(r,i){
   </div>`;
 }
 
+const CATS=[
+ {k:'t50',n:'0050 權值股'},
+ {k:'m100',n:'中型100'},
+ {k:'fin',n:'金融股'},
+ {k:'ai',n:'AI 供應鏈'},
+ {k:'trad',n:'傳產原物料'},
+ {k:'div',n:'高股息'},
+];
+let curCat='t50';
+function buildCats(){
+  $('cats').innerHTML=CATS.map(c=>`<button class="cat${c.k===curCat?' on':''}" data-cat="${c.k}">${c.n}</button>`).join('');
+  const cur=CATS.find(c=>c.k===curCat);
+  if(cur)$('catName').textContent=cur.n;
+}
+$('cats').addEventListener('click',e=>{
+  const b=e.target.closest('[data-cat]');if(!b||b.dataset.cat===curCat)return;
+  curCat=b.dataset.cat;buildCats();run();
+});
+
 let DATA=[];
 const filt={growth:false,cyc:false};
 function applyFilters(){
@@ -171,7 +196,7 @@ async function run(){
   $('list').innerHTML='';$('loading').style.display='block';
   $('runLabel').textContent='掃描中';$('msg').style.display='none';
   try{
-    const r=await fetch('/api/screener',{cache:'no-store'});
+    const r=await fetch('/api/screener?cat='+curCat,{cache:'no-store'});
     if(!r.ok)throw new Error('HTTP '+r.status);
     const d=await r.json();
     if(d.error)throw new Error(d.error);
@@ -185,6 +210,7 @@ async function run(){
   }finally{$('loading').style.display='none';$('runLabel').textContent='掃描';}
 }
 $('btnRun').addEventListener('click',run);
+buildCats();
 run(); // 開啟即掃描
 </script>
 </body>
