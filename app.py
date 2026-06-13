@@ -16,6 +16,9 @@
 from datetime import datetime, timezone, date, timedelta
 from concurrent.futures import ThreadPoolExecutor
 import os
+import re
+import time
+import threading
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -27,6 +30,11 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 # FinMind：台股月營收年增率（更即時準確）。token 可選，註冊後設環境變數 FINMIND_TOKEN 可提高用量上限。
 FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
 FINMIND_TOKEN = os.environ.get("FINMIND_TOKEN", "").strip()
+
+# 證交所開放資料（全上市一次抓，免費免 token）
+TWSE_DAYALL = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
+TWSE_BWIBBU = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL"
+MARKET_THRESH = {"pos": 25, "rsi": 40, "drawdown": -30}  # 全上市初篩門檻（AND）
 
 app = FastAPI(title="premarket-tw")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -166,9 +174,6 @@ def _rsi(series, period=14):
     return float(v.iloc[-1]) if len(v) else None
 
 
-import time
-import threading
-
 _fm_lock = threading.Lock()  # 串行化 FinMind 呼叫，避免同一秒塞太多撞分鐘限制
 
 
@@ -246,10 +251,145 @@ def _rank_scores(values, higher_better):
     return res
 
 
+def _num(x):
+    try:
+        return float(str(x).replace(",", ""))
+    except Exception:
+        return None
+
+
+def twse_universe(top_n=300):
+    """證交所：成交值前 top_n 大的上市普通股 [(code, name), ...]。"""
+    try:
+        data = requests.get(TWSE_DAYALL, timeout=25).json()
+    except Exception:
+        return []
+    rows = []
+    for d in data:
+        code = str(d.get("Code", ""))
+        if not re.match(r"^[1-9]\d{3}$", code):  # 只要普通股，排除 ETF(00xx)、權證等
+            continue
+        rows.append((code, d.get("Name", ""), _num(d.get("TradeValue")) or 0))
+    rows.sort(key=lambda x: x[2], reverse=True)
+    return [(c, n) for c, n, _ in rows[:top_n]]
+
+
+def twse_valuation_all():
+    """證交所：一次抓全上市本益比/淨值比/殖利率 {code: {pe,pb,yld}}。"""
+    out = {}
+    try:
+        for d in requests.get(TWSE_BWIBBU, timeout=25).json():
+            c = str(d.get("Code", ""))
+            pe, pb, y = _num(d.get("PEratio")), _num(d.get("PBratio")), _num(d.get("DividendYield"))
+            out[c] = {"pe": pe if (pe and pe > 0) else None,
+                      "pb": pb if (pb and pb > 0) else None,
+                      "yld": y if y else None}
+    except Exception:
+        pass
+    return out
+
+
 @app.get("/api/categories")
 def categories():
     return [{"key": k, "name": v["name"], "count": len(v["stocks"])}
             for k, v in CATEGORIES.items()]
+
+
+@app.get("/api/market")
+def market(force: int = 0, n: int = 200):
+    """全上市低點掃描：先用價格/技術初篩，通過的才補估值與營收。"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    key = f"{today}:market"
+    if not force and key in _cache:
+        return _cache[key]
+
+    uni = twse_universe(n)
+    if not uni:
+        return {"error": "無法取得上市清單", "rows": []}
+    names = {c: nm for c, nm in uni}
+    codes = [c for c, _ in uni]
+    tickers = [c + ".TW" for c in codes]
+
+    try:
+        raw = yf.download(tickers, period="3y", interval="1d",
+                          progress=False, group_by="column", threads=True)
+        close = raw["Close"] if "Close" in raw else raw
+    except Exception as e:
+        return {"error": f"price download failed: {e}", "rows": []}
+
+    # 第一層：價格/技術初篩（AND 門檻）
+    prelim = []
+    for code in codes:
+        t = code + ".TW"
+        try:
+            s = close[t].dropna() if t in close else None
+        except Exception:
+            s = None
+        if s is None or len(s) < 60:
+            continue
+        last = float(s.iloc[-1]); hi = float(s.max()); lo = float(s.min())
+        pos = (last - lo) / (hi - lo) * 100 if hi > lo else 50
+        ma200 = float(s.rolling(200).mean().dropna().iloc[-1]) if len(s) >= 200 else None
+        dist_ma = (last / ma200 - 1) * 100 if ma200 else None
+        rsi = _rsi(s)
+        dd = (last / hi - 1) * 100
+        if pos >= MARKET_THRESH["pos"]:
+            continue
+        if rsi is None or rsi >= MARKET_THRESH["rsi"]:
+            continue
+        if dd >= MARKET_THRESH["drawdown"]:
+            continue
+        prelim.append({"code": code, "name": names.get(code, code), "price": round(last, 2),
+                       "pos": round(pos, 1), "drawdown": round(dd, 1),
+                       "rsi": round(rsi, 1),
+                       "dist_ma": round(dist_ma, 1) if dist_ma is not None else None})
+
+    # 第二層：估值（證交所全市場一次）＋ 營收（僅通過者）
+    val_all = twse_valuation_all()
+    surv = [r["code"] for r in prelim]
+    revmap = {}
+    if surv:
+        with ThreadPoolExecutor(max_workers=6) as ex:
+            revs = list(ex.map(finmind_rev_growth, surv))
+        revmap = {surv[i]: revs[i] for i in range(len(surv))}
+
+    pe_s = _rank_scores([val_all.get(r["code"], {}).get("pe") for r in prelim], False)
+    pb_s = _rank_scores([val_all.get(r["code"], {}).get("pb") for r in prelim], False)
+    yl_s = _rank_scores([val_all.get(r["code"], {}).get("yld") for r in prelim], True)
+
+    rows = []
+    for idx, r in enumerate(prelim):
+        v = val_all.get(r["code"], {})
+        r["pe"] = round(v["pe"], 1) if v.get("pe") else None
+        r["pb"] = round(v["pb"], 2) if v.get("pb") else None
+        r["yld"] = round(v["yld"], 2) if v.get("yld") else None
+        rv = revmap.get(r["code"])
+        r["rev"] = rv
+        r["rev_src"] = "月" if rv is not None else None
+        r["cyclical"] = CYCLICAL.get(r["code"])
+
+        price_score = 100 - r["pos"]
+        rsi_score = max(0, min(100, (60 - r["rsi"]) / 40 * 100)) if r["rsi"] is not None else None
+        ma_score = max(0, min(100, (-r["dist_ma"]) / 20 * 100)) if r["dist_ma"] is not None else None
+        tp = [x for x in (rsi_score, ma_score) if x is not None]
+        tech = sum(tp) / len(tp) if tp else None
+        vp = [x for x in (pe_s[idx], pb_s[idx], yl_s[idx]) if x is not None]
+        val = sum(vp) / len(vp) if vp else None
+        cp = []
+        if price_score is not None: cp.append((0.40, price_score))
+        if tech is not None: cp.append((0.30, tech))
+        if val is not None: cp.append((0.30, val))
+        ws = sum(w for w, _ in cp)
+        r["score"] = round(sum(w * x for w, x in cp) / ws, 1) if ws else 0
+        rows.append(r)
+
+    rows.sort(key=lambda r: r["score"], reverse=True)
+    result = {"updated": datetime.now(timezone.utc).isoformat(),
+              "cat": "market", "cat_name": "全上市低點", "is_etf": False,
+              "scanned": len(codes), "passed": len(rows),
+              "count": len(rows), "rows": rows}
+    _cache[key] = result
+    return result
 
 
 @app.get("/api/screener")
