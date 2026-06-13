@@ -258,18 +258,29 @@ def _num(x):
         return None
 
 
-def twse_universe(top_n=300):
+def twse_universe(top_n=200):
     """證交所：成交值前 top_n 大的上市普通股 [(code, name), ...]。"""
-    try:
-        data = requests.get(TWSE_DAYALL, timeout=25).json()
-    except Exception:
+    data = None
+    for _ in range(3):  # 資料量大，加重試與較長逾時
+        try:
+            r = requests.get(TWSE_DAYALL, timeout=40)
+            if r.status_code == 200:
+                data = r.json()
+                break
+        except Exception:
+            time.sleep(2)
+    if not data:
         return []
     rows = []
     for d in data:
-        code = str(d.get("Code", ""))
-        if not re.match(r"^[1-9]\d{3}$", code):  # 只要普通股，排除 ETF(00xx)、權證等
+        code = str(d.get("Code", "")).strip()
+        # 只要普通股：純四位數字 1000~9999。排除權證(含英文如 00400A)、ETF(00xx)、特別股等
+        if not re.fullmatch(r"[1-9]\d{3}", code):
             continue
-        rows.append((code, d.get("Name", ""), _num(d.get("TradeValue")) or 0))
+        val = _num(d.get("TradeValue")) or 0
+        if val <= 0:
+            continue
+        rows.append((code, str(d.get("Name", "")).strip(), val))
     rows.sort(key=lambda x: x[2], reverse=True)
     return [(c, n) for c, n, _ in rows[:top_n]]
 
