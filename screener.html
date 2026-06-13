@@ -27,7 +27,9 @@ a{color:var(--d1);text-decoration:none}
 .scorebadge{padding:4px 9px;border-radius:8px;font-weight:700;font-size:14px}
 .filt{padding:7px 12px;border-radius:999px;border:1px solid var(--line);background:var(--panelHi);color:var(--muted);font-size:12px;font-family:inherit;cursor:pointer}
 .filt.on{background:var(--d1);border-color:var(--d1);color:#0A0E1A;font-weight:700}
-.tag{padding:3px 8px;border-radius:7px;font-size:11px;font-weight:600}
+.tag{padding:3px 8px;border-radius:7px;font-size:11px;font-weight:600;cursor:pointer}
+.k.term{border-bottom:1px dashed rgba(255,255,255,0.22);display:inline-block;padding-bottom:1px;cursor:pointer}
+.glossbtn{display:inline-flex;align-items:center;gap:5px;padding:6px 11px;border-radius:999px;border:1px solid var(--line);background:var(--panelHi);color:var(--text);font-size:12px;font-family:inherit;cursor:pointer}
 .spin{width:34px;height:34px;border:3px solid var(--line);border-top-color:var(--d1);border-radius:50%;animation:sp 1s linear infinite;margin:30px auto}
 @keyframes sp{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion:reduce){.spin{animation:none}}
@@ -41,7 +43,11 @@ a{color:var(--d1);text-decoration:none}
     <a href="/" style="font-size:13px">← 盤前風向</a>
   </div>
   <div style="font-size:12px;color:var(--muted);margin-bottom:10px">綜合分數越高 = 越接近相對低點（價格位階40 + 技術30 + 估值30）</div>
-  <div style="font-size:12px;font-weight:600;color:var(--amber);background:rgba(240,180,41,0.08);border:1px solid #f0b42933;border-radius:9px;padding:8px 11px;margin-bottom:14px">⚠ 僅供研究參考，非投資建議</div>
+  <div style="font-size:12px;font-weight:600;color:var(--amber);background:rgba(240,180,41,0.08);border:1px solid #f0b42933;border-radius:9px;padding:8px 11px;margin-bottom:12px">⚠ 僅供研究參考，非投資建議</div>
+  <div class="row" style="gap:9px;margin-bottom:14px;align-items:center">
+    <button class="glossbtn" id="btnGloss">📖 名詞解釋</button>
+    <span style="font-size:11.5px;color:var(--muted)">點卡片任一名詞也能看解釋</span>
+  </div>
 
   <div class="panel" style="padding:12px 14px;margin-bottom:14px">
     <div class="row between">
@@ -75,6 +81,15 @@ a{color:var(--d1);text-decoration:none}
   </div>
 </div>
 
+<div id="backdrop" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:50"></div>
+<div id="sheet" style="display:none;position:fixed;left:0;right:0;bottom:0;z-index:51;background:var(--panelHi);border-top:1px solid var(--line);border-radius:18px 18px 0 0;padding:20px 18px;padding-bottom:calc(22px + env(safe-area-inset-bottom));max-width:480px;margin:0 auto;max-height:72vh;overflow:auto">
+  <div class="row between" style="margin-bottom:10px">
+    <span id="sheetTitle" style="font-weight:700;font-size:16px"></span>
+    <span id="sheetClose" style="color:var(--muted);cursor:pointer;font-size:22px;line-height:1">✕</span>
+  </div>
+  <div id="sheetDesc" style="font-size:13.5px;color:var(--text);line-height:1.75"></div>
+</div>
+
 <script>
 const $=id=>document.getElementById(id);
 function scoreColor(s){
@@ -86,12 +101,33 @@ function scoreColor(s){
 }
 function fmt(v,suf=''){return v==null?'—':v+suf;}
 
+const GLOSSARY={
+ score:{t:'綜合分數',d:'把「價格位階、技術、估值」三項各自評分後加權（40 / 30 / 30）算出的總分，0–100。越高代表越接近相對低點。⚠ 分數高不等於該買，只是縮小研究範圍的起點。'},
+ pos:{t:'5年位階',d:'現在股價落在過去 5 年最高∼最低區間的哪個位置。例如 7% 代表接近 5 年最低區（相對便宜）；數字越低、分數越高。'},
+ drawdown:{t:'距高點',d:'從近 5 年最高點到現在跌了多少。-40% 代表已從高點回檔四成。跌得深不等於便宜，要搭配其他指標一起看。'},
+ rsi:{t:'RSI 相對強弱指標',d:'0–100 的技術指標。低於 30 常被視為「超賣」（可能跌過頭、有反彈機會），高於 70 為「超買」，約 50 為中性。'},
+ dist_ma:{t:'距年線',d:'現價相對 200 日均線（俗稱年線）的差距。負值代表股價在年線之下，常被視為中期偏弱或處於回檔。'},
+ pe:{t:'本益比（PER）',d:'股價 ÷ 每股盈餘。代表用幾倍價格買到一塊錢的年獲利，越低相對越便宜（但要看獲利穩不穩）。顯示「—」通常是近期沒獲利或 EPS 太低、算不出有意義的數字。'},
+ pb:{t:'股價淨值比（PBR）',d:'股價 ÷ 每股淨值。低於 1 代表股價低於公司帳面價值。金融、資產型公司常用這個判斷便宜貴。'},
+ yld:{t:'殖利率',d:'一年現金股利 ÷ 股價。例如 4% 代表照現價買、一年領約 4% 股息。越高領得相對越多，但要留意公司能否持續配發。'},
+ rev:{t:'營收 YoY（月）',d:'最新月營收相對「去年同月」成長多少。正＝成長、負＝衰退，是看公司營運動能最即時的指標。資料來自台股每月 10 號前公布的月營收。'},
+ cyclical:{t:'週期股',d:'獲利隨景氣大起大落的類股（航運、鋼鐵、塑化、水泥等）。它「便宜」常是因為景氣往下，低本益比反而可能是獲利高點的假訊號，抄底要特別小心。'},
+ rev_tag:{t:'營收成長／衰退標籤',d:'依最新月營收年增率標記：正為「營收成長」（藍），負為「營收衰退」（紅）。用來快速看出公司營運是往上還往下。'},
+};
+function openSheet(k){const g=GLOSSARY[k];if(!g)return;$('sheetTitle').textContent=g.t;$('sheetDesc').innerHTML=g.d;$('sheet').style.display='block';$('backdrop').style.display='block';}
+function openGlossary(){$('sheetTitle').textContent='名詞解釋';$('sheetDesc').innerHTML=Object.values(GLOSSARY).map(g=>`<div style="margin-bottom:13px"><b style="color:var(--d1)">${g.t}</b><br>${g.d}</div>`).join('');$('sheet').style.display='block';$('backdrop').style.display='block';}
+function closeSheet(){$('sheet').style.display='none';$('backdrop').style.display='none';}
+document.addEventListener('click',e=>{const el=e.target.closest('[data-term]');if(el)openSheet(el.dataset.term);});
+$('backdrop').addEventListener('click',closeSheet);
+$('sheetClose').addEventListener('click',closeSheet);
+$('btnGloss').addEventListener('click',openGlossary);
+
 function rowCard(r,i){
   const sc=scoreColor(r.score);
   let tags='';
-  if(r.cyclical)tags+=`<span class="tag" style="background:#E8843C1F;color:var(--d1)">週期股·${r.cyclical}</span>`;
-  if(r.rev!=null&&r.rev<0)tags+=`<span class="tag" style="background:#FF3B471F;color:var(--up)">營收衰退</span>`;
-  else if(r.rev!=null&&r.rev>0)tags+=`<span class="tag" style="background:#6FA8FF1F;color:var(--hot)">營收成長</span>`;
+  if(r.cyclical)tags+=`<span class="tag" data-term="cyclical" style="background:#E8843C1F;color:var(--d1)">週期股·${r.cyclical}</span>`;
+  if(r.rev!=null&&r.rev<0)tags+=`<span class="tag" data-term="rev_tag" style="background:#FF3B471F;color:var(--up)">營收衰退</span>`;
+  else if(r.rev!=null&&r.rev>0)tags+=`<span class="tag" data-term="rev_tag" style="background:#6FA8FF1F;color:var(--hot)">營收成長</span>`;
   const tagRow=tags?`<div class="row" style="gap:6px;margin-bottom:10px;flex-wrap:wrap">${tags}</div>`:'';
   const revColor=r.rev==null?'var(--text)':(r.rev<0?'var(--up)':'var(--hot)');
   return `<div class="card">
@@ -101,20 +137,20 @@ function rowCard(r,i){
         <div style="font-weight:700;font-size:15px">${r.name} <span class="mono" style="color:var(--muted);font-size:12px;font-weight:500">${r.code}</span></div>
         <div class="mono" style="font-size:12px;color:var(--muted)">NT$${r.price}</div>
       </div>
-      <div class="scorebadge" style="background:${sc}1F;color:${sc}">${r.score}</div>
+      <div class="scorebadge" data-term="score" style="background:${sc}1F;color:${sc};cursor:pointer">${r.score}</div>
     </div>
     ${tagRow}
     <div class="row" style="gap:10px">
-      <div class="metric"><div class="k">5年位階</div><div class="v mono" style="color:${r.pos<25?'var(--down)':'var(--text)'}">${fmt(r.pos,'%')}</div></div>
-      <div class="metric"><div class="k">距高點</div><div class="v mono">${fmt(r.drawdown,'%')}</div></div>
-      <div class="metric"><div class="k">RSI</div><div class="v mono" style="color:${r.rsi!=null&&r.rsi<30?'var(--down)':'var(--text)'}">${fmt(r.rsi)}</div></div>
-      <div class="metric"><div class="k">距年線</div><div class="v mono">${fmt(r.dist_ma,'%')}</div></div>
+      <div class="metric"><div class="k term" data-term="pos">5年位階</div><div class="v mono" style="color:${r.pos<25?'var(--down)':'var(--text)'}">${fmt(r.pos,'%')}</div></div>
+      <div class="metric"><div class="k term" data-term="drawdown">距高點</div><div class="v mono">${fmt(r.drawdown,'%')}</div></div>
+      <div class="metric"><div class="k term" data-term="rsi">RSI</div><div class="v mono" style="color:${r.rsi!=null&&r.rsi<30?'var(--down)':'var(--text)'}">${fmt(r.rsi)}</div></div>
+      <div class="metric"><div class="k term" data-term="dist_ma">距年線</div><div class="v mono">${fmt(r.dist_ma,'%')}</div></div>
     </div>
     <div class="row" style="gap:10px;margin-top:9px;padding-top:9px;border-top:1px solid var(--line)">
-      <div class="metric"><div class="k">本益比</div><div class="v mono">${fmt(r.pe)}</div></div>
-      <div class="metric"><div class="k">股價淨值</div><div class="v mono">${fmt(r.pb)}</div></div>
-      <div class="metric"><div class="k">殖利率</div><div class="v mono">${fmt(r.yld,'%')}</div></div>
-      <div class="metric"><div class="k">營收YoY${r.rev_src?'('+r.rev_src+')':''}</div><div class="v mono" style="color:${revColor}">${fmt(r.rev,'%')}</div></div>
+      <div class="metric"><div class="k term" data-term="pe">本益比</div><div class="v mono">${fmt(r.pe)}</div></div>
+      <div class="metric"><div class="k term" data-term="pb">股價淨值</div><div class="v mono">${fmt(r.pb)}</div></div>
+      <div class="metric"><div class="k term" data-term="yld">殖利率</div><div class="v mono">${fmt(r.yld,'%')}</div></div>
+      <div class="metric"><div class="k term" data-term="rev">營收YoY${r.rev_src?'('+r.rev_src+')':''}</div><div class="v mono" style="color:${revColor}">${fmt(r.rev,'%')}</div></div>
     </div>
   </div>`;
 }
