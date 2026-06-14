@@ -410,21 +410,85 @@ def categories():
             for k, v in CATEGORIES.items()]
 
 
+def finmind_listed_universe():
+    """FinMind 取全部上市普通股 [(code,name),...]。排除 ETF/權證。"""
+    try:
+        rows = finmind_get({"dataset": "TaiwanStockInfo"})
+    except Exception:
+        rows = None
+    if not rows:
+        return []
+    seen = {}
+    for r in rows:
+        code = str(r.get("stock_id", "")).strip()
+        typ = str(r.get("type", "")).strip().lower()
+        if typ and typ != "twse":
+            continue
+        if not re.fullmatch(r"[1-9]\d{3}", code):
+            continue
+        seen.setdefault(code, str(r.get("stock_name", "")).strip())
+    return list(seen.items())
+
+
+def _avg_trade_value(tickers, chunk=160):
+    """近 7 日平均成交值 {ticker: value}，分批下載降低失敗率。"""
+    out = {}
+    for i in range(0, len(tickers), chunk):
+        part = tickers[i:i + chunk]
+        try:
+            raw = yf.download(part, period="7d", interval="1d",
+                              progress=False, group_by="column", threads=True)
+        except Exception:
+            continue
+        if raw is None or len(raw) == 0:
+            continue
+        try:
+            close = raw["Close"]; vol = raw["Volume"]
+        except Exception:
+            continue
+        single = (len(part) == 1)
+        for t in part:
+            try:
+                if single:
+                    c = close.dropna(); v = vol.dropna()
+                else:
+                    c = close[t].dropna(); v = vol[t].dropna()
+                n = min(len(c), len(v))
+                if n == 0:
+                    continue
+                tv = (c.iloc[-n:].values * v.iloc[-n:].values)
+                out[t] = float(tv.mean())
+            except Exception:
+                continue
+    return out
+
+
 @app.get("/api/market")
-def market(force: int = 0, n: int = 200):
-    """全上市低點掃描：先用價格/技術初篩，通過的才補估值與營收。"""
+def market(force: int = 0, mode: str = "strict", topn: int = 300):
+    """全市場兩段式：FinMind 取清單 → 近期量篩流動性取前 topn → 算位階門檻 → 補估值營收。"""
+    if mode not in THRESH:
+        mode = "strict"
+    th = THRESH[mode]
     today = datetime.now().strftime("%Y-%m-%d")
-    key = f"{today}:market"
+    key = f"{today}:market:{mode}:{topn}"
     if not force and key in _cache:
         return _cache[key]
 
-    uni = twse_universe(n)
+    uni = finmind_listed_universe()
     if not uni:
-        return {"error": "無法取得上市清單", "rows": []}
+        return {"error": "無法取得上市清單(FinMind)", "rows": []}
     names = {c: nm for c, nm in uni}
-    codes = [c for c, _ in uni]
-    tickers = [c + ".TW" for c in codes]
 
+    # 第一段（輕）：近 7 日量，取成交值前 topn
+    all_tickers = [c + ".TW" for c in names]
+    tv = _avg_trade_value(all_tickers)
+    if not tv:
+        return {"error": "量能資料下載失敗", "rows": []}
+    ranked = sorted(tv.items(), key=lambda kv: kv[1], reverse=True)[:topn]
+    codes = [t[:-3] for t, _ in ranked]
+
+    # 第二段（重）：僅前 topn 抓 3 年歷史算位階
+    tickers = [c + ".TW" for c in codes]
     try:
         raw = yf.download(tickers, period="3y", interval="1d",
                           progress=False, group_by="column", threads=True)
@@ -432,7 +496,6 @@ def market(force: int = 0, n: int = 200):
     except Exception as e:
         return {"error": f"price download failed: {e}", "rows": []}
 
-    # 第一層：價格/技術初篩（AND 門檻）
     prelim = []
     for code in codes:
         t = code + ".TW"
@@ -448,33 +511,35 @@ def market(force: int = 0, n: int = 200):
         dist_ma = (last / ma200 - 1) * 100 if ma200 else None
         rsi = _rsi(s)
         dd = (last / hi - 1) * 100
-        if pos >= MARKET_THRESH["pos"]:
+        if pos >= th["pos"]:
             continue
-        if rsi is None or rsi >= MARKET_THRESH["rsi"]:
+        if rsi is None or rsi >= th["rsi"]:
             continue
-        if dd >= MARKET_THRESH["drawdown"]:
+        if dd >= th["drawdown"]:
             continue
         prelim.append({"code": code, "name": names.get(code, code), "price": round(last, 2),
                        "pos": round(pos, 1), "drawdown": round(dd, 1),
                        "rsi": round(rsi, 1),
                        "dist_ma": round(dist_ma, 1) if dist_ma is not None else None})
 
-    # 第二層：估值（證交所全市場一次）＋ 營收（僅通過者）
-    val_all = twse_valuation_all()
+    # 第三段：估值＋營收（FinMind，僅通過者）
     surv = [r["code"] for r in prelim]
-    revmap = {}
+    vals, revmap = {}, {}
     if surv:
-        with ThreadPoolExecutor(max_workers=6) as ex:
-            revs = list(ex.map(finmind_rev_growth, surv))
-        revmap = {surv[i]: revs[i] for i in range(len(surv))}
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            vlist = list(ex.map(_valuation, surv))
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            rlist = list(ex.map(finmind_rev_growth, surv))
+        vals = {surv[i]: vlist[i] for i in range(len(surv))}
+        revmap = {surv[i]: rlist[i] for i in range(len(surv))}
 
-    pe_s = _rank_scores([val_all.get(r["code"], {}).get("pe") for r in prelim], False)
-    pb_s = _rank_scores([val_all.get(r["code"], {}).get("pb") for r in prelim], False)
-    yl_s = _rank_scores([val_all.get(r["code"], {}).get("yld") for r in prelim], True)
+    pe_s = _rank_scores([vals.get(r["code"], {}).get("pe") for r in prelim], False)
+    pb_s = _rank_scores([vals.get(r["code"], {}).get("pb") for r in prelim], False)
+    yl_s = _rank_scores([vals.get(r["code"], {}).get("yld") for r in prelim], True)
 
     rows = []
     for idx, r in enumerate(prelim):
-        v = val_all.get(r["code"], {})
+        v = vals.get(r["code"], {})
         r["pe"] = round(v["pe"], 1) if v.get("pe") else None
         r["pb"] = round(v["pb"], 2) if v.get("pb") else None
         r["yld"] = round(v["yld"], 2) if v.get("yld") else None
@@ -498,10 +563,11 @@ def market(force: int = 0, n: int = 200):
         r["score"] = round(sum(w * x for w, x in cp) / ws, 1) if ws else 0
         rows.append(r)
 
+    enrich_rows(rows)
     rows.sort(key=lambda r: r["score"], reverse=True)
     result = {"updated": datetime.now(timezone.utc).isoformat(),
-              "cat": "market", "cat_name": "全上市低點", "is_etf": False,
-              "scanned": len(codes), "passed": len(rows),
+              "cat": "market", "cat_name": "全市場低點", "is_etf": False, "mode": mode,
+              "scanned": len(names), "liquid": len(codes), "passed": len(rows),
               "count": len(rows), "rows": rows}
     _cache[key] = result
     return result
