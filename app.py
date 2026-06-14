@@ -136,6 +136,7 @@ CATEGORIES = {
         "3037": "欣興", "8046": "南電", "3034": "聯詠", "2379": "瑞昱",
         "3035": "智原", "3443": "創意", "3661": "世芯-KY", "2345": "智邦",
         "2308": "台達電", "3711": "日月光投控", "6196": "帆宣", "1590": "亞德客-KY",
+        "4966": "譜瑞-KY", "5274": "信驊", "3529": "力旺", "5269": "祥碩", "2458": "義隆",
     }},
     "trad": {"name": "傳產原物料", "stocks": {
         "2603": "長榮", "2609": "陽明", "2615": "萬海", "2002": "中鋼",
@@ -143,6 +144,15 @@ CATEGORIES = {
         "1326": "台化", "6505": "台塑化", "1101": "台泥", "1102": "亞泥",
         "1605": "華新", "2105": "正新", "1402": "遠東新", "1722": "台肥",
         "1216": "統一", "1227": "佳格", "9904": "寶成", "9910": "豐泰",
+    }},
+    "bio": {"name": "生技醫療", "stocks": {
+        "6446": "藥華藥", "1795": "美時", "6472": "保瑞", "1707": "葡萄王", "8436": "大江",
+    }},
+    "power": {"name": "重電綠能", "stocks": {
+        "1519": "華城", "1503": "士電", "1513": "中興電", "1514": "亞力", "1504": "東元",
+    }},
+    "travel": {"name": "航空觀光餐飲", "stocks": {
+        "2618": "長榮航", "2610": "華航", "2727": "王品", "2729": "瓦城", "2731": "雄獅",
     }},
     "etf": {"name": "ETF", "etf": True, "stocks": {
         "0050": "元大台灣50", "006208": "富邦台50", "0056": "元大高股息",
@@ -231,6 +241,85 @@ def finmind_rev_growth(code):
         return round((latest["revenue"] / prev["revenue"] - 1) * 100, 1)
     except Exception:
         return None
+
+
+def finmind_inst_streak(code):
+    """外資近期連續買超天數（從最近一個交易日往回數，遇賣超即停）。抓不到回 None。"""
+    try:
+        start = (date.today() - timedelta(days=25)).isoformat()
+        rows = finmind_get({"dataset": "TaiwanStockInstitutionalInvestorsBuySell",
+                            "data_id": code, "start_date": start})
+        if not rows:
+            return None
+        day = {}
+        for r in rows:
+            nm = str(r.get("name", ""))
+            if nm == "Foreign_Investor" or "Foreign_Investor" in nm:
+                net = (r.get("buy", 0) or 0) - (r.get("sell", 0) or 0)
+                day[r.get("date")] = day.get(r.get("date"), 0) + net
+        if not day:  # 欄位不同時退而用全體法人合計
+            for r in rows:
+                net = (r.get("buy", 0) or 0) - (r.get("sell", 0) or 0)
+                day[r.get("date")] = day.get(r.get("date"), 0) + net
+        streak = 0
+        for d in sorted(day.keys(), reverse=True):
+            if day[d] > 0:
+                streak += 1
+            else:
+                break
+        return streak
+    except Exception:
+        return None
+
+
+def finmind_div_years(code):
+    """近年連續配發現金股利的年數（從最近往回數，斷一年即停）。抓不到回 None。"""
+    try:
+        start = (date.today() - timedelta(days=365 * 9)).isoformat()
+        rows = finmind_get({"dataset": "TaiwanStockDividend",
+                            "data_id": code, "start_date": start})
+        if not rows:
+            return None
+        years = {}
+        for r in rows:
+            y = r.get("year")
+            if y is None:
+                y = str(r.get("date", ""))[:4]
+            y = str(y)[:4]
+            cash = 0
+            for k in ("CashEarningsDistribution", "CashStatutorySurplus", "CashCapitalReserve"):
+                cash += (r.get(k, 0) or 0)
+            if cash > 0 and y.isdigit():
+                years[int(y)] = True
+        if not years:
+            return 0
+        ys = sorted(years.keys(), reverse=True)
+        streak, prev = 0, None
+        for y in ys:
+            if prev is None or prev - y == 1:
+                streak += 1
+                prev = y
+            else:
+                break
+        return streak
+    except Exception:
+        return None
+
+
+def _enrich_one(code):
+    return {"inst": finmind_inst_streak(code), "divy": finmind_div_years(code)}
+
+
+def enrich_rows(rows):
+    """為清單補上『外資連續買超天數』與『連續配息年數』。"""
+    if not rows:
+        return
+    codes = [r["code"] for r in rows]
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        res = list(ex.map(_enrich_one, codes))
+    for r, e in zip(rows, res):
+        r["inst"] = e["inst"]
+        r["divy"] = e["divy"]
 
 
 def _valuation(code):
@@ -505,6 +594,7 @@ def scan_all(force: int = 0, mode: str = "strict"):
         r["score"] = round(sum(w * x for w, x in cp) / ws, 1) if ws else 0
         rows.append(r)
 
+    enrich_rows(rows)
     rows.sort(key=lambda r: r["score"], reverse=True)
     result = {"updated": datetime.now(timezone.utc).isoformat(),
               "cat": "all", "cat_name": "全部低點", "is_etf": False, "mode": mode,
@@ -604,6 +694,8 @@ def screener(cat: str = "t50", force: int = 0):
         composite = sum(w * v for w, v in comp_parts) / wsum if wsum else 0
         r["score"] = round(composite, 1)
 
+    if not is_etf:
+        enrich_rows(rows)
     rows.sort(key=lambda r: r["score"], reverse=True)
     result = {"updated": datetime.now(timezone.utc).isoformat(),
               "cat": cat, "cat_name": CATEGORIES[cat]["name"], "is_etf": is_etf,
