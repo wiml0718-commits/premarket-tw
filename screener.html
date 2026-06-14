@@ -55,7 +55,7 @@ a{color:var(--d1);text-decoration:none}
 
   <div id="cats" class="catrow"></div>
   <div id="etfNote" style="display:none;font-size:11.5px;color:var(--muted);background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:9px 12px;margin-bottom:12px;line-height:1.6">ETF 是一籃子股票，以「價格位階＋技術」評分；基金無本益比、營收，故不顯示那幾欄。</div>
-  <div id="mktNote" style="display:none;font-size:11.5px;color:var(--muted);background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:9px 12px;margin-bottom:12px;line-height:1.6">⚡ 全部低點：掃所有觀察池（約百檔個股），篩出<b style="color:var(--text)">同時</b>符合門檻者再排序。<b style="color:var(--text)">嚴格</b>＝位階&lt;25%·RSI&lt;40·距高點&lt;-30%；<b style="color:var(--text)">放寬</b>＝位階&lt;40%·RSI&lt;50·距高點&lt;-20%。多頭時可能很少甚至 0 檔，屬正常。</div>
+  <div id="mktNote" style="display:none;font-size:11.5px;color:var(--muted);background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:9px 12px;margin-bottom:12px;line-height:1.6">篩出<b style="color:var(--text)">同時</b>符合門檻者再排序。<b style="color:var(--text)">嚴格</b>＝位階&lt;25%·RSI&lt;40·距高點&lt;-30%；<b style="color:var(--text)">放寬</b>＝位階&lt;40%·RSI&lt;50·距高點&lt;-20%。多頭時可能很少甚至 0 檔，屬正常。🌐 全市場為實驗功能：先抓全市場量能取流動性前段，再算位階，第一次較慢。</div>
 
   <div class="panel" style="padding:12px 14px;margin-bottom:14px">
     <div class="row between">
@@ -198,6 +198,7 @@ const CATS=[
  {k:'travel',n:'航空觀光餐飲'},
  {k:'etf',n:'ETF'},
  {k:'all',n:'⚡全部低點'},
+ {k:'market',n:'🌐全市場(試)'},
 ];
 let allMode='strict';
 let curCat='t50';
@@ -238,11 +239,17 @@ async function run(force){
   $('list').innerHTML='';$('loading').style.display='block';
   $('runLabel').textContent='掃描中';$('msg').style.display='none';
   const isAll=curCat==='all';
-  $('loadTxt').textContent=isAll
-    ?'全部觀察池掃描中，約 1–2 分鐘（抓全池價格再初篩；首次喚醒服務會更久）'
-    :'運算中，約 30–90 秒（為避免限流會逐筆抓取，首次喚醒服務會更久）';
+  const isMarket=curCat==='market';
+  $('loadTxt').textContent=isMarket
+    ?'全市場掃描中，約 2–4 分鐘（先抓全市場量能篩流動性、再算前段位階；首次喚醒服務會更久，請耐心等）'
+    :(isAll
+      ?'全部觀察池掃描中，約 1–2 分鐘（抓全池價格再初篩；首次喚醒服務會更久）'
+      :'運算中，約 30–90 秒（為避免限流會逐筆抓取，首次喚醒服務會更久）');
   try{
-    const url=isAll?('/api/all?mode='+allMode+(force?'&force=1':'')):('/api/screener?cat='+curCat+(force?'&force=1':''));
+    let url;
+    if(isMarket)url='/api/market?mode='+allMode+(force?'&force=1':'');
+    else if(isAll)url='/api/all?mode='+allMode+(force?'&force=1':'');
+    else url='/api/screener?cat='+curCat+(force?'&force=1':'');
     const r=await fetch(url,{cache:'no-store'});
     if(!r.ok)throw new Error('HTTP '+r.status);
     const d=await r.json();
@@ -251,13 +258,17 @@ async function run(force){
     curIsEtf=!!d.is_etf;
     $('etfNote').style.display=curIsEtf?'block':'none';
     const isAllCat=(d.cat==='all');
-    $('mktNote').style.display=isAllCat?'block':'none';
-    $('modeRow').style.display=isAllCat?'flex':'none';
+    const isMktCat=(d.cat==='market');
+    $('mktNote').style.display=(isAllCat||isMktCat)?'block':'none';
+    $('modeRow').style.display=(isAllCat||isMktCat)?'flex':'none';
     const t=new Date();
     const ts='更新 '+t.toLocaleString('zh-TW',{hour12:false}).slice(5);
-    $('updated').textContent=isAllCat
-      ?(ts+'　掃描 '+d.scanned+' · 符合 '+d.passed+' 檔')
-      :(ts+'　共 '+d.count+' 檔');
+    if(isMktCat)
+      $('updated').textContent=ts+'　全市場 '+d.scanned+' · 流動前 '+d.liquid+' · 符合 '+d.passed+' 檔';
+    else if(isAllCat)
+      $('updated').textContent=ts+'　掃描 '+d.scanned+' · 符合 '+d.passed+' 檔';
+    else
+      $('updated').textContent=ts+'　共 '+d.count+' 檔';
     applyFilters();
   }catch(e){
     $('msg').style.display='block';$('msg').style.color='var(--down)';
