@@ -280,16 +280,17 @@ def finmind_div_years(code):
                             "data_id": code, "start_date": start})
         if not rows:
             return None
+        # 以「除息日(西元年)」歸類，同一年有多筆（多次配息）只要任一筆現金>0 即算該年有配
         years = {}
         for r in rows:
-            y = r.get("year")
-            if y is None:
-                y = str(r.get("date", ""))[:4]
-            y = str(y)[:4]
+            ds = str(r.get("CashExDividendTradingDate") or r.get("date") or "")
+            y = ds[:4]
+            if not y.isdigit():
+                continue
             cash = 0
             for k in ("CashEarningsDistribution", "CashStatutorySurplus", "CashCapitalReserve"):
                 cash += (r.get(k, 0) or 0)
-            if cash > 0 and y.isdigit():
+            if cash > 0:
                 years[int(y)] = True
         if not years:
             return 0
