@@ -463,114 +463,161 @@ def _avg_trade_value(tickers, chunk=160):
     return out
 
 
+# ===== 全市場：背景執行 + 輪詢（避開免費方案單一請求逾時）=====
+_JOBS = {}            # key -> {"status","progress","result","error"}
+_jobs_lock = threading.Lock()
+
+
+def _job_set(key, **kw):
+    with _jobs_lock:
+        j = _JOBS.get(key, {"status": "running", "progress": "", "result": None, "error": None})
+        j.update(kw)
+        _JOBS[key] = j
+
+
+def _run_market_scan(key, mode, topn):
+    """背景執行的全市場兩段式掃描，進度與結果寫入 _JOBS[key]。"""
+    try:
+        th = THRESH[mode]
+        _job_set(key, status="running", progress="取得上市清單…")
+        uni = finmind_listed_universe()
+        if not uni:
+            _job_set(key, status="error", error="無法取得上市清單(FinMind)")
+            return
+        names = {c: nm for c, nm in uni}
+
+        _job_set(key, progress=f"全市場 {len(names)} 檔，篩流動性…")
+        all_tickers = [c + ".TW" for c in names]
+        tv = _avg_trade_value(all_tickers)
+        if not tv:
+            _job_set(key, status="error", error="量能資料下載失敗")
+            return
+        ranked = sorted(tv.items(), key=lambda kv: kv[1], reverse=True)[:topn]
+        codes = [t[:-3] for t, _ in ranked]
+
+        _job_set(key, progress=f"流動前 {len(codes)} 檔，計算位階…")
+        tickers = [c + ".TW" for c in codes]
+        try:
+            raw = yf.download(tickers, period="3y", interval="1d",
+                              progress=False, group_by="column", threads=True)
+            close = raw["Close"] if "Close" in raw else raw
+        except Exception as e:
+            _job_set(key, status="error", error=f"price download failed: {e}")
+            return
+
+        prelim = []
+        for code in codes:
+            t = code + ".TW"
+            try:
+                s = close[t].dropna() if t in close else None
+            except Exception:
+                s = None
+            if s is None or len(s) < 60:
+                continue
+            last = float(s.iloc[-1]); hi = float(s.max()); lo = float(s.min())
+            pos = (last - lo) / (hi - lo) * 100 if hi > lo else 50
+            ma200 = float(s.rolling(200).mean().dropna().iloc[-1]) if len(s) >= 200 else None
+            dist_ma = (last / ma200 - 1) * 100 if ma200 else None
+            rsi = _rsi(s)
+            dd = (last / hi - 1) * 100
+            if pos >= th["pos"]:
+                continue
+            if rsi is None or rsi >= th["rsi"]:
+                continue
+            if dd >= th["drawdown"]:
+                continue
+            prelim.append({"code": code, "name": names.get(code, code), "price": round(last, 2),
+                           "pos": round(pos, 1), "drawdown": round(dd, 1),
+                           "rsi": round(rsi, 1),
+                           "dist_ma": round(dist_ma, 1) if dist_ma is not None else None})
+
+        _job_set(key, progress=f"通過初篩 {len(prelim)} 檔，補估值營收…")
+        surv = [r["code"] for r in prelim]
+        vals, revmap = {}, {}
+        if surv:
+            with ThreadPoolExecutor(max_workers=8) as ex:
+                vlist = list(ex.map(_valuation, surv))
+            with ThreadPoolExecutor(max_workers=8) as ex:
+                rlist = list(ex.map(finmind_rev_growth, surv))
+            vals = {surv[i]: vlist[i] for i in range(len(surv))}
+            revmap = {surv[i]: rlist[i] for i in range(len(surv))}
+
+        pe_s = _rank_scores([vals.get(r["code"], {}).get("pe") for r in prelim], False)
+        pb_s = _rank_scores([vals.get(r["code"], {}).get("pb") for r in prelim], False)
+        yl_s = _rank_scores([vals.get(r["code"], {}).get("yld") for r in prelim], True)
+
+        rows = []
+        for idx, r in enumerate(prelim):
+            v = vals.get(r["code"], {})
+            r["pe"] = round(v["pe"], 1) if v.get("pe") else None
+            r["pb"] = round(v["pb"], 2) if v.get("pb") else None
+            r["yld"] = round(v["yld"], 2) if v.get("yld") else None
+            rv = revmap.get(r["code"])
+            r["rev"] = rv
+            r["rev_src"] = "月" if rv is not None else None
+            r["cyclical"] = CYCLICAL.get(r["code"])
+
+            price_score = 100 - r["pos"]
+            rsi_score = max(0, min(100, (60 - r["rsi"]) / 40 * 100)) if r["rsi"] is not None else None
+            ma_score = max(0, min(100, (-r["dist_ma"]) / 20 * 100)) if r["dist_ma"] is not None else None
+            tp = [x for x in (rsi_score, ma_score) if x is not None]
+            tech = sum(tp) / len(tp) if tp else None
+            vp = [x for x in (pe_s[idx], pb_s[idx], yl_s[idx]) if x is not None]
+            val = sum(vp) / len(vp) if vp else None
+            cp = []
+            if price_score is not None: cp.append((0.40, price_score))
+            if tech is not None: cp.append((0.30, tech))
+            if val is not None: cp.append((0.30, val))
+            ws = sum(w for w, _ in cp)
+            r["score"] = round(sum(w * x for w, x in cp) / ws, 1) if ws else 0
+            rows.append(r)
+
+        enrich_rows(rows)
+        rows.sort(key=lambda r: r["score"], reverse=True)
+        result = {"updated": datetime.now(timezone.utc).isoformat(),
+                  "cat": "market", "cat_name": "全市場低點", "is_etf": False, "mode": mode,
+                  "scanned": len(names), "liquid": len(codes), "passed": len(rows),
+                  "count": len(rows), "rows": rows}
+        _cache[key] = result
+        _job_set(key, status="done", progress="完成", result=result)
+    except Exception as e:
+        _job_set(key, status="error", error=str(e))
+
+
 @app.get("/api/market")
 def market(force: int = 0, mode: str = "strict", topn: int = 300):
-    """全市場兩段式：FinMind 取清單 → 近期量篩流動性取前 topn → 算位階門檻 → 補估值營收。"""
+    """輪詢式：首呼啟動背景掃描並回 running，之後每次回進度，完成回結果。"""
     if mode not in THRESH:
         mode = "strict"
-    th = THRESH[mode]
     today = datetime.now().strftime("%Y-%m-%d")
     key = f"{today}:market:{mode}:{topn}"
-    if not force and key in _cache:
-        return _cache[key]
 
-    uni = finmind_listed_universe()
-    if not uni:
-        return {"error": "無法取得上市清單(FinMind)", "rows": []}
-    names = {c: nm for c, nm in uni}
+    if force:
+        _cache.pop(key, None)
+        with _jobs_lock:
+            _JOBS.pop(key, None)
 
-    # 第一段（輕）：近 7 日量，取成交值前 topn
-    all_tickers = [c + ".TW" for c in names]
-    tv = _avg_trade_value(all_tickers)
-    if not tv:
-        return {"error": "量能資料下載失敗", "rows": []}
-    ranked = sorted(tv.items(), key=lambda kv: kv[1], reverse=True)[:topn]
-    codes = [t[:-3] for t, _ in ranked]
+    if key in _cache:
+        return {"status": "done", **_cache[key]}
 
-    # 第二段（重）：僅前 topn 抓 3 年歷史算位階
-    tickers = [c + ".TW" for c in codes]
-    try:
-        raw = yf.download(tickers, period="3y", interval="1d",
-                          progress=False, group_by="column", threads=True)
-        close = raw["Close"] if "Close" in raw else raw
-    except Exception as e:
-        return {"error": f"price download failed: {e}", "rows": []}
+    with _jobs_lock:
+        job = _JOBS.get(key)
+        snap = dict(job) if job else None
 
-    prelim = []
-    for code in codes:
-        t = code + ".TW"
-        try:
-            s = close[t].dropna() if t in close else None
-        except Exception:
-            s = None
-        if s is None or len(s) < 60:
-            continue
-        last = float(s.iloc[-1]); hi = float(s.max()); lo = float(s.min())
-        pos = (last - lo) / (hi - lo) * 100 if hi > lo else 50
-        ma200 = float(s.rolling(200).mean().dropna().iloc[-1]) if len(s) >= 200 else None
-        dist_ma = (last / ma200 - 1) * 100 if ma200 else None
-        rsi = _rsi(s)
-        dd = (last / hi - 1) * 100
-        if pos >= th["pos"]:
-            continue
-        if rsi is None or rsi >= th["rsi"]:
-            continue
-        if dd >= th["drawdown"]:
-            continue
-        prelim.append({"code": code, "name": names.get(code, code), "price": round(last, 2),
-                       "pos": round(pos, 1), "drawdown": round(dd, 1),
-                       "rsi": round(rsi, 1),
-                       "dist_ma": round(dist_ma, 1) if dist_ma is not None else None})
+    if snap:
+        if snap["status"] == "done" and snap.get("result"):
+            return {"status": "done", **snap["result"]}
+        if snap["status"] == "error":
+            with _jobs_lock:
+                _JOBS.pop(key, None)
+            return {"status": "error", "error": snap.get("error", "未知錯誤")}
+        return {"status": "running", "progress": snap.get("progress", "掃描中…")}
 
-    # 第三段：估值＋營收（FinMind，僅通過者）
-    surv = [r["code"] for r in prelim]
-    vals, revmap = {}, {}
-    if surv:
-        with ThreadPoolExecutor(max_workers=8) as ex:
-            vlist = list(ex.map(_valuation, surv))
-        with ThreadPoolExecutor(max_workers=8) as ex:
-            rlist = list(ex.map(finmind_rev_growth, surv))
-        vals = {surv[i]: vlist[i] for i in range(len(surv))}
-        revmap = {surv[i]: rlist[i] for i in range(len(surv))}
-
-    pe_s = _rank_scores([vals.get(r["code"], {}).get("pe") for r in prelim], False)
-    pb_s = _rank_scores([vals.get(r["code"], {}).get("pb") for r in prelim], False)
-    yl_s = _rank_scores([vals.get(r["code"], {}).get("yld") for r in prelim], True)
-
-    rows = []
-    for idx, r in enumerate(prelim):
-        v = vals.get(r["code"], {})
-        r["pe"] = round(v["pe"], 1) if v.get("pe") else None
-        r["pb"] = round(v["pb"], 2) if v.get("pb") else None
-        r["yld"] = round(v["yld"], 2) if v.get("yld") else None
-        rv = revmap.get(r["code"])
-        r["rev"] = rv
-        r["rev_src"] = "月" if rv is not None else None
-        r["cyclical"] = CYCLICAL.get(r["code"])
-
-        price_score = 100 - r["pos"]
-        rsi_score = max(0, min(100, (60 - r["rsi"]) / 40 * 100)) if r["rsi"] is not None else None
-        ma_score = max(0, min(100, (-r["dist_ma"]) / 20 * 100)) if r["dist_ma"] is not None else None
-        tp = [x for x in (rsi_score, ma_score) if x is not None]
-        tech = sum(tp) / len(tp) if tp else None
-        vp = [x for x in (pe_s[idx], pb_s[idx], yl_s[idx]) if x is not None]
-        val = sum(vp) / len(vp) if vp else None
-        cp = []
-        if price_score is not None: cp.append((0.40, price_score))
-        if tech is not None: cp.append((0.30, tech))
-        if val is not None: cp.append((0.30, val))
-        ws = sum(w for w, _ in cp)
-        r["score"] = round(sum(w * x for w, x in cp) / ws, 1) if ws else 0
-        rows.append(r)
-
-    enrich_rows(rows)
-    rows.sort(key=lambda r: r["score"], reverse=True)
-    result = {"updated": datetime.now(timezone.utc).isoformat(),
-              "cat": "market", "cat_name": "全市場低點", "is_etf": False, "mode": mode,
-              "scanned": len(names), "liquid": len(codes), "passed": len(rows),
-              "count": len(rows), "rows": rows}
-    _cache[key] = result
-    return result
+    # 尚無任務 → 啟動背景執行緒
+    with _jobs_lock:
+        _JOBS[key] = {"status": "running", "progress": "啟動掃描…", "result": None, "error": None}
+    threading.Thread(target=_run_market_scan, args=(key, mode, topn), daemon=True).start()
+    return {"status": "running", "progress": "啟動掃描…"}
 
 
 @app.get("/api/all")
