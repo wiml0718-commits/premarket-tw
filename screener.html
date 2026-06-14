@@ -285,17 +285,19 @@ async function runMarket(force){
   if(mktTimer){clearInterval(mktTimer);mktTimer=null;}
   $('loadTxt').textContent='全市場掃描中…（背景執行，首次約 2–4 分鐘，請別關閉頁面）';
   const base='/api/market?mode='+allMode;
-  let started=false, tries=0;
+  let started=false, tries=0, softFail=0;
+  const stop=(msg)=>{clearInterval(mktTimer);mktTimer=null;$('loading').style.display='none';$('runLabel').textContent='掃描';
+    $('msg').style.display='block';$('msg').style.color='var(--down)';$('msg').textContent=msg;};
   const tick=async()=>{
     tries++;
-    if(tries>120){clearInterval(mktTimer);mktTimer=null;$('loading').style.display='none';$('runLabel').textContent='掃描';
-      $('msg').style.display='block';$('msg').style.color='var(--down)';$('msg').textContent='掃描逾時，請再按一次掃描。';return;}
+    if(tries>140){stop('掃描逾時，請再按一次掃描。');return;}
     try{
       const url=base+((force&&!started)?'&force=1':'');
       started=true;
       const r=await fetch(url,{cache:'no-store'});
       if(!r.ok)throw new Error('HTTP '+r.status);
       const d=await r.json();
+      softFail=0; // 成功通訊，歸零容錯計數
       if(d.status==='running'){
         $('loadTxt').textContent='全市場掃描中…'+(d.progress?('（'+d.progress+'）'):'')+' 已等 '+(tries*3)+' 秒';
         return;
@@ -305,10 +307,13 @@ async function runMarket(force){
       if(d.status==='error'||d.error)throw new Error(d.error||'掃描失敗');
       showResult(d);
     }catch(e){
-      clearInterval(mktTimer);mktTimer=null;
-      $('loading').style.display='none';$('runLabel').textContent='掃描';
-      $('msg').style.display='block';$('msg').style.color='var(--down)';
-      $('msg').textContent='掃描失敗：'+e.message+'。稍候再試一次。';
+      // 網路抖動／冷啟動：容忍數次，背景任務可能仍在跑
+      softFail++;
+      if(softFail<=8){
+        $('loadTxt').textContent='連線不穩，重試中…（'+softFail+'）背景仍在掃描，請稍候';
+        return;
+      }
+      stop('掃描失敗：'+e.message+'。背景可能仍在跑，請過一會兒再按掃描看結果。');
     }
   };
   await tick();                       // 立即啟動
