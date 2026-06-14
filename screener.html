@@ -68,6 +68,9 @@ a{color:var(--d1);text-decoration:none}
     <div class="row" style="gap:8px;margin-top:11px">
       <button class="filt" id="fGrowth">排除營收衰退</button>
       <button class="filt" id="fCyc">排除週期股</button>
+      <button class="filt" id="fInst">法人買超</button>
+      <button class="filt" id="fDiv">配息≥5年</button>
+      <button class="filt" id="fYld">殖利率≥4%</button>
       <span class="mono" id="count" style="margin-left:auto;font-size:11px;color:var(--muted)"></span>
     </div>
     <div class="row" id="modeRow" style="gap:8px;margin-top:9px;display:none;align-items:center">
@@ -126,6 +129,8 @@ const GLOSSARY={
  rev:{t:'營收 YoY（月）',d:'最新月營收相對「去年同月」成長多少。正＝成長、負＝衰退，是看公司營運動能最即時的指標。資料來自台股每月 10 號前公布的月營收。'},
  cyclical:{t:'週期股',d:'獲利隨景氣大起大落的類股（航運、鋼鐵、塑化、水泥等）。它「便宜」常是因為景氣往下，低本益比反而可能是獲利高點的假訊號，抄底要特別小心。'},
  rev_tag:{t:'營收成長／衰退標籤',d:'依最新月營收年增率標記：正為「營收成長」（藍），負為「營收衰退」（紅）。用來快速看出公司營運是往上還往下。'},
+ inst:{t:'外資連買',d:'外資（外國法人）從最近一個交易日往回數，連續幾天「買超」（買進多於賣出），遇到賣超就停。天數越多，代表外資近期持續站在買方，常被視為有資金進場的訊號。⚠ 法人也會看錯，僅供參考。'},
+ divy:{t:'連續配息',d:'公司最近往回連續幾年都有配發現金股利，斷一年就停止計算。年數越多，通常代表獲利與配息較穩定，是過濾體質的參考。'},
 };
 function openSheet(k){const g=GLOSSARY[k];if(!g)return;$('sheetTitle').textContent=g.t;$('sheetDesc').innerHTML=g.d;$('sheet').style.display='block';$('backdrop').style.display='block';}
 function openGlossary(){$('sheetTitle').textContent='名詞解釋';$('sheetDesc').innerHTML=Object.values(GLOSSARY).map(g=>`<div style="margin-bottom:13px"><b style="color:var(--d1)">${g.t}</b><br>${g.d}</div>`).join('');$('sheet').style.display='block';$('backdrop').style.display='block';}
@@ -167,6 +172,16 @@ function rowCard(r,i){
       <div class="metric"><div class="k term" data-term="yld">殖利率</div><div class="v mono">${fmt(r.yld,'%')}</div></div>
       <div class="metric"><div class="k term" data-term="rev">營收YoY${r.rev_src?'('+r.rev_src+')':''}</div><div class="v mono" style="color:${revColor}">${fmt(r.rev,'%')}</div></div>
     </div>`;
+    const instTxt=r.inst==null?'—':(r.inst>0?r.inst+'日':'0');
+    const instColor=(r.inst!=null&&r.inst>0)?'var(--hot)':'var(--text)';
+    const divTxt=r.divy==null?'—':r.divy+'年';
+    const divColor=(r.divy!=null&&r.divy>=5)?'var(--hot)':'var(--text)';
+    card+=`<div class="row" style="gap:10px;margin-top:9px">
+      <div class="metric"><div class="k term" data-term="inst">外資連買</div><div class="v mono" style="color:${instColor}">${instTxt}</div></div>
+      <div class="metric"><div class="k term" data-term="divy">連續配息</div><div class="v mono" style="color:${divColor}">${divTxt}</div></div>
+      <div class="metric"></div>
+      <div class="metric"></div>
+    </div>`;
   }
   card+=`</div>`;
   return card;
@@ -178,6 +193,9 @@ const CATS=[
  {k:'fin',n:'金融股'},
  {k:'ai',n:'AI 供應鏈'},
  {k:'trad',n:'傳產原物料'},
+ {k:'bio',n:'生技醫療'},
+ {k:'power',n:'重電綠能'},
+ {k:'travel',n:'航空觀光餐飲'},
  {k:'etf',n:'ETF'},
  {k:'all',n:'⚡全部低點'},
 ];
@@ -195,16 +213,22 @@ $('cats').addEventListener('click',e=>{
 
 let DATA=[];
 let curIsEtf=false;
-const filt={growth:false,cyc:false};
+const filt={growth:false,cyc:false,inst:false,div:false,yld:false};
 function applyFilters(){
   let rows=DATA.slice();
   if(filt.growth)rows=rows.filter(r=>!(r.rev!=null&&r.rev<0));
   if(filt.cyc)rows=rows.filter(r=>!r.cyclical);
+  if(filt.inst)rows=rows.filter(r=>r.inst!=null&&r.inst>0);
+  if(filt.div)rows=rows.filter(r=>r.divy!=null&&r.divy>=5);
+  if(filt.yld)rows=rows.filter(r=>r.yld!=null&&r.yld>=4);
   $('list').innerHTML=rows.map((r,i)=>rowCard(r,i)).join('');
   $('count').textContent='顯示 '+rows.length+' 檔';
 }
 $('fGrowth').addEventListener('click',()=>{filt.growth=!filt.growth;$('fGrowth').classList.toggle('on',filt.growth);applyFilters();});
 $('fCyc').addEventListener('click',()=>{filt.cyc=!filt.cyc;$('fCyc').classList.toggle('on',filt.cyc);applyFilters();});
+$('fInst').addEventListener('click',()=>{filt.inst=!filt.inst;$('fInst').classList.toggle('on',filt.inst);applyFilters();});
+$('fDiv').addEventListener('click',()=>{filt.div=!filt.div;$('fDiv').classList.toggle('on',filt.div);applyFilters();});
+$('fYld').addEventListener('click',()=>{filt.yld=!filt.yld;$('fYld').classList.toggle('on',filt.yld);applyFilters();});
 function syncModeBtns(){$('mStrict').classList.toggle('on',allMode==='strict');$('mLoose').classList.toggle('on',allMode==='loose');}
 $('mStrict').addEventListener('click',()=>{if(allMode!=='strict'){allMode='strict';syncModeBtns();run();}});
 $('mLoose').addEventListener('click',()=>{if(allMode!=='loose'){allMode='loose';syncModeBtns();run();}});
