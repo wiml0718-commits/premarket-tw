@@ -283,6 +283,16 @@ function showResult(d){
 let mktTimer=null;
 async function runMarket(force){
   if(mktTimer){clearInterval(mktTimer);mktTimer=null;}
+  curIsEtf=false;DATA=[];
+  $('etfNote').style.display='none';
+  $('mktNote').style.display='block';
+  $('modeRow').style.display='flex';
+  if(!force){
+    // 切到分頁但未按掃描：全市場掃描昂貴，等使用者主動按「掃描」
+    $('loading').style.display='none';$('runLabel').textContent='掃描';
+    $('list').innerHTML='';$('updated').textContent='尚未掃描（按「掃描」開始，約 2–4 分鐘）';
+    return;
+  }
   $('loadTxt').textContent='全市場掃描中…（背景執行，首次約 2–4 分鐘，請別關閉頁面）';
   const base='/api/market?mode='+allMode;
   let started=false, tries=0, softFail=0;
@@ -300,6 +310,10 @@ async function runMarket(force){
       softFail=0; // 成功通訊，歸零容錯計數
       if(d.status==='running'){
         $('loadTxt').textContent='全市場掃描中…'+(d.progress?('（'+d.progress+'）'):'')+' 已等 '+(tries*3)+' 秒';
+        return;
+      }
+      if(d.status==='idle'){
+        stop('服務剛重啟（很可能記憶體不足），背景任務被中斷。請再按一次「掃描」重跑。');
         return;
       }
       clearInterval(mktTimer);mktTimer=null;
