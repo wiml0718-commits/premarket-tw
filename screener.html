@@ -55,7 +55,7 @@ a{color:var(--d1);text-decoration:none}
 
   <div id="cats" class="catrow"></div>
   <div id="etfNote" style="display:none;font-size:11.5px;color:var(--muted);background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:9px 12px;margin-bottom:12px;line-height:1.6">ETF 是一籃子股票，以「價格位階＋技術」評分；基金無本益比、營收，故不顯示那幾欄。</div>
-  <div id="mktNote" style="display:none;font-size:11.5px;color:var(--muted);background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:9px 12px;margin-bottom:12px;line-height:1.6">篩出<b style="color:var(--text)">同時</b>符合門檻者再排序。<b style="color:var(--text)">嚴格</b>＝位階&lt;25%·RSI&lt;40·距高點&lt;-30%；<b style="color:var(--text)">放寬</b>＝位階&lt;40%·RSI&lt;50·距高點&lt;-20%。多頭時可能很少甚至 0 檔，屬正常。🌐 全市場為實驗功能：先抓全市場量能取流動性前段，再算位階，第一次較慢。</div>
+  <div id="mktNote" style="display:none;font-size:11.5px;color:var(--muted);background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:9px 12px;margin-bottom:12px;line-height:1.6">篩出<b style="color:var(--text)">同時</b>符合門檻者再排序。<b style="color:var(--text)">嚴格</b>＝位階&lt;25%·RSI&lt;40·距高點&lt;-30%；<b style="color:var(--text)">放寬</b>＝位階&lt;40%·RSI&lt;50·距高點&lt;-20%。多頭時可能很少甚至 0 檔，屬正常。🌐 全市場為實驗功能：每天首次會先抓全市場量能排出流動性前 300 大（較久），之後分 ①前100 ②101-200 ③201-300 三段各自掃描，每段約 1–2 分鐘。</div>
 
   <div class="panel" style="padding:12px 14px;margin-bottom:14px">
     <div class="row between">
@@ -77,6 +77,12 @@ a{color:var(--d1);text-decoration:none}
       <span style="font-size:11.5px;color:var(--muted)">門檻</span>
       <button class="filt" id="mStrict">嚴格</button>
       <button class="filt" id="mLoose">放寬</button>
+    </div>
+    <div class="row" id="segRow" style="gap:8px;margin-top:9px;display:none;align-items:center;flex-wrap:wrap">
+      <span style="font-size:11.5px;color:var(--muted)">區段</span>
+      <button class="filt" id="seg1">①前100</button>
+      <button class="filt" id="seg2">②101-200</button>
+      <button class="filt" id="seg3">③201-300</button>
     </div>
     <div id="msg" style="margin-top:8px;font-size:11.5px;color:var(--muted);display:none"></div>
   </div>
@@ -235,6 +241,11 @@ $('mStrict').addEventListener('click',()=>{if(allMode!=='strict'){allMode='stric
 $('mLoose').addEventListener('click',()=>{if(allMode!=='loose'){allMode='loose';syncModeBtns();run();}});
 syncModeBtns();
 
+let curSeg=1;
+function syncSegBtns(){[1,2,3].forEach(n=>$('seg'+n).classList.toggle('on',curSeg===n));}
+[1,2,3].forEach(n=>$('seg'+n).addEventListener('click',()=>{curSeg=n;syncSegBtns();run(true);}));
+syncSegBtns();
+
 async function run(force){
   if(mktTimer){clearInterval(mktTimer);mktTimer=null;}
   $('list').innerHTML='';$('loading').style.display='block';
@@ -268,10 +279,11 @@ function showResult(d){
   const isMktCat=(d.cat==='market');
   $('mktNote').style.display=(isAllCat||isMktCat)?'block':'none';
   $('modeRow').style.display=(isAllCat||isMktCat)?'flex':'none';
+  $('segRow').style.display=isMktCat?'flex':'none';
   const t=new Date();
   const ts='更新 '+t.toLocaleString('zh-TW',{hour12:false}).slice(5);
   if(isMktCat)
-    $('updated').textContent=ts+'　全市場 '+d.scanned+' · 流動前 '+d.liquid+' · 符合 '+d.passed+' 檔';
+    $('updated').textContent=ts+'　第'+d.seg+'段(前'+d.seg_from+'–'+d.seg_to+'大) · 符合 '+d.passed+' 檔';
   else if(isAllCat)
     $('updated').textContent=ts+'　掃描 '+d.scanned+' · 符合 '+d.passed+' 檔';
   else
@@ -287,14 +299,16 @@ async function runMarket(force){
   $('etfNote').style.display='none';
   $('mktNote').style.display='block';
   $('modeRow').style.display='flex';
+  $('segRow').style.display='flex';
+  syncSegBtns();
   if(!force){
-    // 切到分頁但未按掃描：全市場掃描昂貴，等使用者主動按「掃描」
+    // 切到分頁但未按掃描：全市場掃描昂貴，等使用者主動按「掃描」或選區段
     $('loading').style.display='none';$('runLabel').textContent='掃描';
-    $('list').innerHTML='';$('updated').textContent='尚未掃描（按「掃描」開始，約 2–4 分鐘）';
+    $('list').innerHTML='';$('updated').textContent='選區段後按「掃描」（每段約 1–2 分鐘，首次含排名較久）';
     return;
   }
-  $('loadTxt').textContent='全市場掃描中…（背景執行，首次約 2–4 分鐘，請別關閉頁面）';
-  const base='/api/market?mode='+allMode;
+  $('loadTxt').textContent='第'+curSeg+'段掃描中…（背景執行，首次含全市場排名約 2–3 分鐘，請別關閉頁面）';
+  const base='/api/market?mode='+allMode+'&seg='+curSeg;
   let started=false, tries=0, softFail=0;
   const stop=(msg)=>{clearInterval(mktTimer);mktTimer=null;$('loading').style.display='none';$('runLabel').textContent='掃描';
     $('msg').style.display='block';$('msg').style.color='var(--down)';$('msg').textContent=msg;};
