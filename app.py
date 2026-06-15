@@ -519,30 +519,46 @@ def _scan_prices_chunked(codes, names, th, period="2y", chunk=80, progress_cb=No
     return prelim
 
 
-def _run_market_scan(key, mode, topn):
-    """背景執行的全市場兩段式掃描（記憶體精簡版），進度與結果寫入 _JOBS[key]。"""
+def _get_market_rank(topn=300):
+    """全市場流動性排名（每日快取一次）：回 {'codes':[...top topn...], 'names':{...}}。"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    rkey = f"{today}:market:rank"
+    if rkey in _cache:
+        return _cache[rkey]
+    uni = finmind_listed_universe()
+    if not uni:
+        return None
+    names = {c: nm for c, nm in uni}
+    tv = _avg_trade_value([c + ".TW" for c in names], chunk=120)
+    if not tv:
+        return None
+    ranked = sorted(tv.items(), key=lambda kv: kv[1], reverse=True)[:topn]
+    codes = [t[:-3] for t, _ in ranked]
+    data = {"codes": codes, "names": names}
+    _cache[rkey] = data
+    return data
+
+
+def _run_market_scan(key, mode, seg, size=100, topn=300):
+    """背景執行：取每日流動性排名 → 掃描第 seg 段（每段 size 檔）→ 補估值營收。"""
     try:
         th = THRESH[mode]
-        _job_set(key, status="running", progress="取得上市清單…")
-        uni = finmind_listed_universe()
-        if not uni:
-            _job_set(key, status="error", error="無法取得上市清單(FinMind)")
+        _job_set(key, status="running", progress="取得清單／流動性排名（首次較久）…")
+        rank = _get_market_rank(topn)
+        if not rank:
+            _job_set(key, status="error", error="無法取得清單或量能(FinMind/Yahoo)")
             return
-        names = {c: nm for c, nm in uni}
-
-        _job_set(key, progress=f"全市場 {len(names)} 檔，篩流動性…")
-        all_tickers = [c + ".TW" for c in names]
-        tv = _avg_trade_value(all_tickers, chunk=120)
-        if not tv:
-            _job_set(key, status="error", error="量能資料下載失敗")
+        names = rank["names"]
+        allcodes = rank["codes"]
+        lo = (seg - 1) * size
+        seg_codes = allcodes[lo:lo + size]
+        if not seg_codes:
+            _job_set(key, status="error", error="此區段無資料")
             return
-        ranked = sorted(tv.items(), key=lambda kv: kv[1], reverse=True)[:topn]
-        codes = [t[:-3] for t, _ in ranked]
-        del tv, all_tickers
 
         def _cb(done, total, passed):
-            _job_set(key, progress=f"計算位階 {done}/{total} 檔（已符合 {passed}）…")
-        prelim = _scan_prices_chunked(codes, names, th, period="2y", chunk=80, progress_cb=_cb)
+            _job_set(key, progress=f"第{seg}段 計算位階 {done}/{total} 檔（已符合 {passed}）…")
+        prelim = _scan_prices_chunked(seg_codes, names, th, period="2y", chunk=80, progress_cb=_cb)
 
         _job_set(key, progress=f"通過初篩 {len(prelim)} 檔，補估值營收…")
         surv = [r["code"] for r in prelim]
@@ -589,7 +605,8 @@ def _run_market_scan(key, mode, topn):
         rows.sort(key=lambda r: r["score"], reverse=True)
         result = {"updated": datetime.now(timezone.utc).isoformat(),
                   "cat": "market", "cat_name": "全市場低點", "is_etf": False, "mode": mode,
-                  "scanned": len(names), "liquid": len(codes), "passed": len(rows),
+                  "seg": seg, "seg_from": lo + 1, "seg_to": lo + len(seg_codes),
+                  "scanned": len(seg_codes), "liquid": len(allcodes), "passed": len(rows),
                   "count": len(rows), "rows": rows}
         _cache[key] = result
         _job_set(key, status="done", progress="完成", result=result)
@@ -598,12 +615,14 @@ def _run_market_scan(key, mode, topn):
 
 
 @app.get("/api/market")
-def market(force: int = 0, mode: str = "strict", topn: int = 200):
-    """輪詢式：force=1 啟動背景掃描；之後輪詢回進度/結果。防鬼打牆：輪詢不自動重啟。"""
+def market(force: int = 0, mode: str = "strict", seg: int = 1):
+    """輪詢式：force=1 啟動背景掃描第 seg 段（每段 100 檔）；之後輪詢回進度/結果。"""
     if mode not in THRESH:
         mode = "strict"
+    if seg not in (1, 2, 3):
+        seg = 1
     today = datetime.now().strftime("%Y-%m-%d")
-    key = f"{today}:market:{mode}:{topn}"
+    key = f"{today}:market:{mode}:seg{seg}"
 
     if force:
         _cache.pop(key, None)
@@ -626,12 +645,11 @@ def market(force: int = 0, mode: str = "strict", topn: int = 200):
             return {"status": "error", "error": snap.get("error", "未知錯誤")}
         return {"status": "running", "progress": snap.get("progress", "掃描中…")}
 
-    # 無任務：只有 force 才啟動；一般輪詢回 idle（代表服務可能剛重啟）
     if not force:
         return {"status": "idle"}
     with _jobs_lock:
         _JOBS[key] = {"status": "running", "progress": "啟動掃描…", "result": None, "error": None}
-    threading.Thread(target=_run_market_scan, args=(key, mode, topn), daemon=True).start()
+    threading.Thread(target=_run_market_scan, args=(key, mode, seg), daemon=True).start()
     return {"status": "running", "progress": "啟動掃描…"}
 
 
